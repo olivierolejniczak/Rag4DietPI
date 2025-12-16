@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================================
 # RAG System v44 - Core Setup
-# Features: SearXNG self-hosted, Docker auto-deploy, systemd service
+# Features: DuckDuckGo web search, Docker auto-deploy, systemd service
 # ============================================================================
 
 set -e
@@ -256,148 +256,8 @@ fi
 # ============================================================================
 echo ""
 echo "Creating directory structure..."
-mkdir -p "$PROJECT_DIR"/{documents,cache,lib,searxng,logs}
+mkdir -p "$PROJECT_DIR"/{documents,cache,lib,logs}
 log_ok "Directories created"
-
-# ============================================================================
-# Create SearXNG Configuration
-# ============================================================================
-echo "Creating SearXNG configuration..."
-
-cat > "$PROJECT_DIR/searxng/settings.yml" << 'EOFSEARX'
-# SearXNG Settings - RAG v44
-# Only non-commercial, privacy-respecting engines
-
-use_default_settings: false
-
-general:
-  instance_name: "RAG-SearXNG"
-  debug: false
-  privacypolicy_url: false
-  donation_url: false
-  contact_url: false
-  enable_metrics: false
-
-search:
-  safe_search: 0
-  autocomplete: ""
-  default_lang: "en"
-  max_page: 0
-  formats:
-    - html
-    - json
-
-server:
-  port: 8080
-  bind_address: "0.0.0.0"
-  secret_key: "rag-searxng-secret-key-change-me"
-  limiter: false
-  public_instance: false
-
-ui:
-  static_use_hash: true
-  default_theme: simple
-  results_on_new_tab: false
-
-# WHITELISTED ENGINES ONLY
-# NO commercial engines: google, bing, yahoo, yandex, baidu, qwant
-engines:
-  # Wikipedia / Knowledge
-  - name: wikipedia
-    engine: wikipedia
-    shortcut: wp
-    disabled: false
-    weight: 1.5
-
-  - name: wikidata
-    engine: wikidata
-    shortcut: wd
-    disabled: false
-    weight: 1.2
-
-  # Technical / Programming
-  - name: stackoverflow
-    engine: stackoverflow
-    shortcut: so
-    disabled: false
-    weight: 1.5
-
-  - name: stackexchange
-    engine: stackexchange
-    shortcut: se
-    disabled: false
-    sites: superuser.com,serverfault.com,askubuntu.com,unix.stackexchange.com
-    weight: 1.3
-
-  - name: mdn
-    engine: mdn
-    shortcut: mdn
-    disabled: false
-    weight: 1.4
-
-  # Archives / Libraries
-  - name: archive
-    engine: archive_is
-    shortcut: ar
-    disabled: false
-    weight: 1.0
-
-  - name: openlibrary
-    engine: openlibrary
-    shortcut: ol
-    disabled: false
-    weight: 1.0
-
-  # Linux Documentation
-  - name: debian
-    engine: debian
-    shortcut: deb
-    disabled: false
-    categories: [it, packages]
-    weight: 1.2
-
-  - name: archlinux
-    engine: arch_linux_wiki
-    shortcut: arch
-    disabled: false
-    weight: 1.3
-
-  - name: gentoo
-    engine: gentoo
-    shortcut: gt
-    disabled: false
-    weight: 1.1
-
-  # DuckDuckGo Lite (non-tracking version)
-  - name: duckduckgo_lite
-    engine: duckduckgo
-    shortcut: ddg
-    disabled: false
-    weight: 1.0
-
-# Explicitly disable all commercial engines
-  - name: google
-    disabled: true
-  - name: bing
-    disabled: true
-  - name: yahoo
-    disabled: true
-  - name: yandex
-    disabled: true
-  - name: baidu
-    disabled: true
-  - name: qwant
-    disabled: true
-
-outgoing:
-  request_timeout: 10.0
-  max_request_timeout: 15.0
-  useragent_suffix: ""
-  pool_connections: 100
-  pool_maxsize: 10
-EOFSEARX
-
-log_ok "SearXNG settings.yml created"
 
 # ============================================================================
 # Create Docker Compose File
@@ -419,24 +279,6 @@ services:
     environment:
       - QDRANT__SERVICE__GRPC_PORT=6334
 
-  # SearXNG - Privacy-respecting metasearch
-  searxng:
-    image: searxng/searxng:latest
-    container_name: rag-searxng
-    ports:
-      - "8085:8080"
-    volumes:
-      - ./searxng:/etc/searxng:rw
-    environment:
-      - SEARXNG_BASE_URL=http://localhost:8085/
-    restart: unless-stopped
-    cap_drop:
-      - ALL
-    cap_add:
-      - CHOWN
-      - SETGID
-      - SETUID
-
 volumes:
   qdrant_data:
 EOFDOCKER
@@ -444,13 +286,13 @@ EOFDOCKER
 log_ok "docker-compose.yml created"
 
 # ============================================================================
-# Create Systemd Service for SearXNG
+# Create Systemd Service for Qdrant
 # ============================================================================
 echo "Creating systemd service..."
 
 cat > /etc/systemd/system/rag-services.service << EOFSVC
 [Unit]
-Description=RAG System Services (Qdrant + SearXNG)
+Description=RAG System Services (Qdrant)
 Requires=docker.service
 After=docker.service network-online.target
 
@@ -546,15 +388,12 @@ CRAG_MIN_RELEVANCE=0.40
 CRAG_WEB_FALLBACK=true
 
 # =========================
-# WEB SEARCH - SearXNG ONLY
+# WEB SEARCH - DuckDuckGo
 # =========================
-WEB_SEARCH_PROVIDER=searxng
+WEB_SEARCH_PROVIDER=duckduckgo
 WEB_SEARCH_ENABLED=true
 WEB_SEARCH_MODE=auto
-SEARXNG_URL=http://localhost:8085/search
-SEARXNG_TIMEOUT=10
-SEARXNG_MAX_RESULTS=5
-SEARXNG_ALLOWED_ENGINES=wikipedia,wikidata,stackexchange,stackoverflow,archive,openlibrary,mdn,debian,archlinux,gentoo,duckduckgo_lite
+WEB_SEARCH_MAX_RESULTS=5
 
 # =========================
 # GENERATION
@@ -581,8 +420,7 @@ EMBEDDING_TIMEOUT=60
 EMBEDDING_TIMEOUT_FULL=0
 RERANK_TIMEOUT=60
 RERANK_TIMEOUT_FULL=0
-SEARXNG_TIMEOUT=10
-SEARXNG_TIMEOUT_FULL=30
+WEB_SEARCH_TIMEOUT=10
 
 # =========================
 # CONTEXT SIZE
@@ -668,7 +506,7 @@ else
     echo "[WARN] Ollama not found"
 fi
 
-# Start Docker services (Qdrant + SearXNG)
+# Start Docker services (Qdrant)
 echo "Starting Docker services..."
 docker compose up -d
 
@@ -681,14 +519,6 @@ if curl -s http://localhost:6333/health | grep -q "ok"; then
     echo "[OK] Qdrant ready"
 else
     echo "[WAIT] Qdrant starting..."
-    sleep 5
-fi
-
-# Check SearXNG
-if curl -s "http://localhost:8085/search?q=test&format=json" | grep -q "results"; then
-    echo "[OK] SearXNG ready"
-else
-    echo "[WAIT] SearXNG starting..."
     sleep 5
 fi
 
@@ -739,19 +569,10 @@ else
     echo "✗ Not running"
 fi
 
-# SearXNG
-echo -n "SearXNG:  "
-SEARXNG_URL="${SEARXNG_URL:-http://localhost:8085/search}"
-if curl -s "${SEARXNG_URL}?q=test&format=json" 2>/dev/null | grep -q "results"; then
-    echo "✓ Running at ${SEARXNG_URL%/search}"
-else
-    echo "✗ Not running"
-fi
-
 # Docker
 echo -n "Docker:   "
-if docker ps --format '{{.Names}}' | grep -E "rag-|searxng|qdrant" > /dev/null 2>&1; then
-    CONTAINERS=$(docker ps --format '{{.Names}}' | grep -E "rag-|searxng|qdrant" | tr '\n' ', ')
+if docker ps --format '{{.Names}}' | grep -E "rag-|qdrant" > /dev/null 2>&1; then
+    CONTAINERS=$(docker ps --format '{{.Names}}' | grep -E "rag-|qdrant" | tr '\n' ', ')
     echo "✓ Containers: ${CONTAINERS%,}"
 else
     echo "○ No RAG containers running"
@@ -789,16 +610,6 @@ fi
 # Check Qdrant
 echo -n "Checking Qdrant... "
 if curl -s "${QDRANT_HOST:-http://localhost:6333}/health" | grep -q "ok"; then
-    echo "✓"
-else
-    echo "✗ FAILED"
-    ((ERRORS++))
-fi
-
-# Check SearXNG
-echo -n "Checking SearXNG... "
-SEARXNG_BASE="${SEARXNG_URL:-http://localhost:8085/search}"
-if curl -s "${SEARXNG_BASE}?q=test&format=json" 2>/dev/null | grep -q "results"; then
     echo "✓"
 else
     echo "✗ FAILED"
@@ -878,17 +689,6 @@ docker compose up -d
 echo "Waiting for services to initialize..."
 sleep 10
 
-# Verify SearXNG
-echo -n "Verifying SearXNG... "
-for i in {1..6}; do
-    if curl -s "http://localhost:8085/search?q=test&format=json" | grep -q "results"; then
-        echo "✓ Ready"
-        break
-    fi
-    sleep 5
-    echo -n "."
-done
-
 # ============================================================================
 # Summary
 # ============================================================================
@@ -903,12 +703,9 @@ echo "Embedding: nomic-embed-text (768 dim)"
 echo ""
 echo "Services:"
 echo "  • Qdrant:   http://localhost:6333"
-echo "  • SearXNG:  http://localhost:8085"
 echo "  • Ollama:   http://localhost:11434"
 echo ""
-echo "SearXNG Engines (whitelisted only):"
-echo "  wikipedia, wikidata, stackoverflow, stackexchange,"
-echo "  mdn, archive, openlibrary, debian, archlinux, gentoo"
+echo "Web Search: DuckDuckGo (via Python library)"
 echo ""
 echo "Next steps:"
 echo "  1. bash setup-rag-ingest-v44.sh"
