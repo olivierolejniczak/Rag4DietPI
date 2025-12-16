@@ -94,16 +94,6 @@ if ! command -v python3 &> /dev/null; then
 fi
 log_ok "Python3 installed"
 
-# Check Docker
-if ! command -v docker &> /dev/null; then
-    log_warn "Docker not found - SearXNG will not be available"
-    log_info "To install Docker: curl -fsSL https://get.docker.com | sh"
-    SKIP_SEARXNG=true
-else
-    log_ok "Docker installed"
-    SKIP_SEARXNG=false
-fi
-
 echo ""
 log_info "Step 1/7: Running core setup..."
 ./setup-rag-core-v44.sh "$INSTALL_DIR"
@@ -120,38 +110,15 @@ log_info "Step 3/7: Running query setup (with CRAG fixes)..."
 log_ok "Query setup complete (includes all CRAG fixes)"
 
 echo ""
-if [ "$SKIP_SEARXNG" = false ]; then
-    log_info "Step 4/7: Installing SearXNG..."
-
-    # Check if SearXNG already running
-    if docker ps | grep -q searxng; then
-        log_ok "SearXNG already running"
-    else
-        # Remove old container if exists
-        docker rm -f searxng 2>/dev/null || true
-
-        # Start SearXNG
-        docker run -d \
-            --name searxng \
-            -p 8085:8080 \
-            -e SEARXNG_BASE_URL=http://localhost:8085/ \
-            --restart unless-stopped \
-            searxng/searxng:latest
-
-        log_ok "SearXNG started"
-        log_info "Waiting 20 seconds for SearXNG startup..."
-        sleep 20
-
-        # Test SearXNG
-        if curl -s "http://localhost:8085/search?q=test&format=json" > /dev/null; then
-            log_ok "SearXNG is responding"
-        else
-            log_warn "SearXNG may not be ready yet (try testing manually later)"
-        fi
-    fi
+log_info "Step 4/7: Installing DuckDuckGo search library..."
+cd "$INSTALL_DIR"
+if [ -d "./venv" ]; then
+    source ./venv/bin/activate
+    pip install -q duckduckgo-search
+    log_ok "DuckDuckGo search installed (CRAG web search enabled)"
 else
-    log_warn "Step 4/7: Skipping SearXNG (Docker not available)"
-    log_info "CRAG web search will not work without SearXNG"
+    log_warn "No venv found, skipping DuckDuckGo installation"
+    log_info "CRAG web search will not work without duckduckgo-search"
 fi
 
 echo ""
@@ -233,12 +200,6 @@ echo "  --debug                         - Show detailed debug output"
 echo "  --full                          - Enable all features (CRAG, reranking, etc.)"
 echo "  --clear-cache                   - Clear query cache"
 echo ""
-if [ "$SKIP_SEARXNG" = true ]; then
-    log_warn "SearXNG not installed - CRAG web search will not work"
-    echo "  To install Docker: curl -fsSL https://get.docker.com | sh"
-    echo "  Then run: docker run -d --name searxng -p 8085:8080 searxng/searxng:latest"
-    echo ""
-fi
 echo "Documentation:"
 echo "  - Fresh install guide: $SCRIPT_DIR/FRESH-INSTALL-GUIDE.md"
 echo "  - Fix guide: $SCRIPT_DIR/FIX-ALTICAP-QUERY.md"
