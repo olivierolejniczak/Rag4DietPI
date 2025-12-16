@@ -2,39 +2,79 @@
 
 ## Executive Summary
 
-Your query for "Alticap" returns Harry Potter dialogue instead of relevant content. This is caused by **TWO independent issues** that need to be fixed:
+Your query for "Alticap" returns Harry Potter dialogue instead of relevant content. This WAS caused by **THREE independent issues** that have been FIXED in `setup-rag-query-v44.sh`:
 
-1. **BM25 index missing** → BM25 returns 0 results
-2. **SearXNG not running** → CRAG can't trigger web search
+1. ✅ **FIXED**: Early-return bug prevented CRAG from being called
+2. ✅ **FIXED**: Missing debug output made CRAG operation invisible
+3. ✅ **FIXED**: SearXNG bot detection blocked web search
+4. **Still needed**: SearXNG must be installed and running
 
-Both need to be fixed for optimal results.
-
-## Quick Fix (5-10 minutes)
+## Quick Fix (Fresh Install)
 
 ```bash
-# Step 1: Pull the fixes
+# Step 1: Pull the latest fixes
 cd ~/Rag4DietPI
 git pull origin claude/debug-rag-query-F6HAr
 
-# Step 2: Fix BM25
-cd /root
-cp ~/Rag4DietPI/rebuild-bm25.sh .
-chmod +x rebuild-bm25.sh
-./rebuild-bm25.sh
+# Step 2: Run setup (if not done already)
+cd /desired/installation/path
+~/Rag4DietPI/setup-rag-core-v44.sh
+~/Rag4DietPI/setup-rag-ingest-v44.sh
+~/Rag4DietPI/setup-rag-query-v44.sh  # ← Now includes all fixes!
 
 # Step 3: Install SearXNG (Docker required)
 docker run -d --name searxng -p 8085:8080 \
   --restart unless-stopped searxng/searxng:latest
 sleep 15  # Wait for startup
 
-# Step 4: Apply CRAG debug patch
-cp ~/Rag4DietPI/patch-crag-debug.sh .
-chmod +x patch-crag-debug.sh
-./patch-crag-debug.sh
+# Step 4: Ingest documents
+./ingest.sh
 
 # Step 5: Test
-./query.sh --clear-cache
 ./query.sh --debug --full "Alticap"
+```
+
+## What Was Fixed
+
+The `setup-rag-query-v44.sh` script now includes:
+
+1. **Fixed early-return bug** (line 971-978)
+   - Previously: returned immediately when chunks was empty
+   - Now: calls CRAG even with empty chunks
+
+2. **Added CRAG debug output** (lines 715-773)
+   - Shows quality evaluation scores
+   - Shows CRAG decision (SUFFICIENT vs INSUFFICIENT)
+   - Shows web search results count
+
+3. **Added SearXNG headers** (lines 1205-1209)
+   - Bypasses bot detection
+   - Adds proper User-Agent and forwarding headers
+
+4. **Added error messages** (lines 1263-1293)
+   - Shows when SearXNG is not accessible
+   - Shows timeouts and connection errors
+   - Visible in --debug mode
+
+## Quick Fix (Existing Install - Legacy)
+
+If you already have an older installation:
+
+```bash
+# Option A: Reinstall with fixed script
+cd /root
+# Backup old installation
+mv query.sh query.sh.old
+mv lib lib.old
+
+# Run new setup
+cd ~/Rag4DietPI
+git pull origin claude/debug-rag-query-F6HAr
+./setup-rag-query-v44.sh /root
+
+# Option B: Apply manual patches (not recommended)
+# Use rebuild-bm25.sh and patch-crag-debug.sh
+# See legacy instructions below
 ```
 
 ## Understanding the Issues
