@@ -4,7 +4,7 @@
 # ============================================================================
 # All features fully implemented:
 #   - HyDE (Hypothetical Document Embeddings)
-#   - CRAG (Corrective RAG with SearXNG web fallback)
+#   - CRAG (Corrective RAG with DuckDuckGo web fallback)
 #   - FlashRank reranking
 #   - StepBack prompting
 #   - Subquery decomposition
@@ -17,7 +17,7 @@
 #   - Self-RAG
 #   - Query caching
 #   - Conversation memory
-#   - SearXNG web search (privacy-respecting, no commercial engines)
+#   - DuckDuckGo web search (simple, reliable, no setup required)
 #   - Enhanced debug output (LLM/embedding model info)
 #   - --full mode with NO timeouts
 #
@@ -1123,13 +1123,12 @@ EOFPY
 log_ok "Grounding module"
 
 # ============================================================================
-# Web Search Module - SearXNG (Privacy-Respecting)
+# Web Search Module - DuckDuckGo (Simple and Reliable)
 # ============================================================================
 echo "Creating web search module..."
 cat > lib/web_search.py << 'EOFPY'
-"""Web Search via SearXNG - Privacy-respecting, self-hosted"""
+"""Web Search via DuckDuckGo - Simple and reliable"""
 import os
-import requests
 import time
 
 # Debug storage for web search
@@ -1137,7 +1136,6 @@ _web_debug = {
     "enabled": False,
     "searches": [],
     "total_results": 0,
-    "engines_used": set(),
 }
 
 def reset_web_debug():
@@ -1147,19 +1145,16 @@ def reset_web_debug():
         "enabled": False,
         "searches": [],
         "total_results": 0,
-        "engines_used": set(),
     }
 
 def get_web_debug():
     """Get web search debug info"""
-    result = _web_debug.copy()
-    result["engines_used"] = list(_web_debug["engines_used"])
-    return result
+    return _web_debug.copy()
 
 def search_web(query, max_results=5, timeout=None):
     """
-    Search web using SearXNG.
-    
+    Search web using DuckDuckGo.
+
     Returns list of:
     {
         "title": str,
@@ -1170,123 +1165,68 @@ def search_web(query, max_results=5, timeout=None):
     }
     """
     global _web_debug
-    
-    searxng_url = os.environ.get("SEARXNG_URL", "http://localhost:8085/search")
-    timeout = timeout or int(os.environ.get("SEARXNG_TIMEOUT", "10"))
-    allowed_engines = os.environ.get("SEARXNG_ALLOWED_ENGINES", "")
-    debug_web = os.environ.get("DEBUG_WEB", "false").lower() == "true"
-    
-    _web_debug["enabled"] = debug_web
-    
+
+    debug = os.environ.get("DEBUG", "false").lower() == "true"
+    _web_debug["enabled"] = debug
+
     search_record = {
         "query": query,
-        "url": searxng_url,
+        "engine": "duckduckgo",
         "timestamp": time.time(),
         "results": [],
-        "engines_responded": [],
         "error": None,
     }
-    
+
     try:
-        params = {
-            "q": query,
-            "format": "json",
-            "safesearch": "0",
-        }
-        
-        # Add engine filter if specified
-        if allowed_engines:
-            params["engines"] = allowed_engines
-        
-        resp = requests.get(
-            searxng_url,
-            params=params,
-            timeout=timeout,
-            headers={
-                'X-Forwarded-For': '127.0.0.1',
-                'X-Real-IP': '127.0.0.1',
-                'User-Agent': 'Mozilla/5.0 (RAGSystem/1.0)'
-            }
-        )
-        
-        if resp.status_code != 200:
-            search_record["error"] = f"HTTP {resp.status_code}"
-            _web_debug["searches"].append(search_record)
-            return []
-        
-        data = resp.json()
-        raw_results = data.get("results", [])
-        
-        # Track which engines responded
-        engines_in_results = set()
-        for r in raw_results:
-            eng = r.get("engine", "unknown")
-            engines_in_results.add(eng)
-            _web_debug["engines_used"].add(eng)
-        
-        search_record["engines_responded"] = list(engines_in_results)
-        
+        from duckduckgo_search import DDGS
+
+        if debug:
+            print(f"  [WEB SEARCH] Searching DuckDuckGo for: {query}")
+
+        # Search DuckDuckGo
+        ddgs_results = list(DDGS().text(query, max_results=max_results))
+
         # Format results
         results = []
-        seen_urls = set()
-        
-        for r in raw_results[:max_results * 2]:  # Get more, dedupe later
-            url = r.get("url", "")
-            if url in seen_urls:
-                continue
-            seen_urls.add(url)
-            
+        for i, r in enumerate(ddgs_results):
             result = {
                 "title": r.get("title", ""),
-                "url": url,
-                "snippet": r.get("content", ""),
-                "engine": r.get("engine", "unknown"),
-                "score": r.get("score", 0.0),
+                "url": r.get("href", ""),
+                "snippet": r.get("body", ""),
+                "engine": "duckduckgo",
+                "score": 1.0 - (i * 0.1),  # Simple scoring
             }
             results.append(result)
-            
+
             search_record["results"].append({
                 "title": result["title"][:50],
-                "url": url,
-                "engine": result["engine"],
-                "used_for_context": len(results) <= max_results,
+                "url": result["url"],
+                "engine": "duckduckgo",
             })
-            
-            if len(results) >= max_results:
-                break
-        
+
         _web_debug["total_results"] += len(results)
         _web_debug["searches"].append(search_record)
-        
+
+        if debug:
+            print(f"  [WEB SEARCH] Got {len(results)} results from DuckDuckGo")
+
         return results
-        
-    except requests.exceptions.Timeout:
-        search_record["error"] = f"Timeout ({timeout}s)"
+
+    except ImportError:
+        error_msg = "duckduckgo-search not installed"
+        search_record["error"] = error_msg
         _web_debug["searches"].append(search_record)
 
-        # Show error in DEBUG mode
-        debug = os.environ.get("DEBUG", "false").lower() == "true"
         if debug:
-            print(f"  [WEB SEARCH] ✗ Timeout after {timeout}s")
+            print(f"  [WEB SEARCH] ✗ {error_msg}")
+            print(f"  [WEB SEARCH] Install: pip install duckduckgo-search")
 
         return []
-    except requests.exceptions.ConnectionError:
-        search_record["error"] = "Connection failed - is SearXNG running?"
-        _web_debug["searches"].append(search_record)
 
-        # Show error in DEBUG mode (not just DEBUG_WEB)
-        debug = os.environ.get("DEBUG", "false").lower() == "true"
-        if debug:
-            print(f"  [WEB SEARCH] ✗ SearXNG not accessible at {searxng_url}")
-            print(f"  [WEB SEARCH] Install: docker run -d -p 8085:8080 searxng/searxng")
-
-        return []
     except Exception as e:
         search_record["error"] = str(e)
         _web_debug["searches"].append(search_record)
 
-        # Show error in DEBUG mode
-        debug = os.environ.get("DEBUG", "false").lower() == "true"
         if debug:
             print(f"  [WEB SEARCH] ✗ Error: {e}")
 
@@ -1296,38 +1236,38 @@ def format_web_results(results):
     """Format web results for context"""
     if not results:
         return ""
-    
+
     parts = []
     for i, r in enumerate(results, 1):
-        engine = r.get("engine", "web")
-        parts.append(f"[WEB:{engine}] {r['title']}\nURL: {r['url']}\n{r['snippet']}")
-    
-    return "\n\n".join(parts)
+        parts.append(f"[Web {i}] {r['title']}")
+        parts.append(f"URL: {r['url']}")
+        parts.append(f"{r['snippet']}")
+        parts.append("")
+
+    return "\n".join(parts)
 
 def print_web_debug():
     """Print web search debug info"""
     debug = get_web_debug()
-    
+
     if not debug["enabled"]:
         return
-    
+
     print("\n[WEB DEBUG]")
     print(f"  Searches: {len(debug['searches'])}")
     print(f"  Total results: {debug['total_results']}")
-    print(f"  Engines used: {', '.join(debug['engines_used']) or 'none'}")
-    
+
     for i, search in enumerate(debug["searches"], 1):
         print(f"\n  Search #{i}: '{search['query'][:30]}...'")
         if search["error"]:
             print(f"    ERROR: {search['error']}")
         else:
-            print(f"    Engines responded: {', '.join(search['engines_responded'])}")
+            print(f"    Engine: {search['engine']}")
             print(f"    Results: {len(search['results'])}")
             for r in search["results"][:3]:
-                status = "✓" if r["used_for_context"] else "○"
-                print(f"      {status} [{r['engine']}] {r['title'][:40]}...")
+                print(f"      ✓ {r['title'][:40]}...")
 EOFPY
-log_ok "Web search module (SearXNG)"
+log_ok "Web search module (DuckDuckGo)"
 
 # ============================================================================
 # Citations Module
