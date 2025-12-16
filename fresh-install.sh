@@ -5,7 +5,13 @@
 # This script performs a complete fresh installation of the RAG system
 # with all CRAG fixes included.
 #
-# Usage:
+# Usage Option 1 - Download and install in one command:
+#   bash <(curl -s https://raw.githubusercontent.com/olivierolejniczak/Rag4DietPI/claude/debug-rag-query-F6HAr/fresh-install.sh)
+#
+# Usage Option 2 - Clone first, then run:
+#   git clone https://github.com/olivierolejniczak/Rag4DietPI.git
+#   cd Rag4DietPI
+#   git checkout claude/debug-rag-query-F6HAr
 #   ./fresh-install.sh [installation_directory]
 #
 # Example:
@@ -36,12 +42,45 @@ echo ""
 log_info "Installation directory: $INSTALL_DIR"
 echo ""
 
-# Verify we're in the Rag4DietPI directory
+# Check if we need to clone the repository
 if [ ! -f "setup-rag-core-v44.sh" ]; then
-    log_error "Must run from Rag4DietPI directory!"
-    log_info "Example: cd ~/Rag4DietPI && ./fresh-install.sh /root"
+    log_info "Repository not found, cloning from GitHub..."
+
+    # Check git is installed
+    if ! command -v git &> /dev/null; then
+        log_error "Git not found! Install: apt install git"
+        exit 1
+    fi
+
+    # Clone to temporary directory in user's home
+    REPO_DIR="$HOME/Rag4DietPI"
+
+    if [ -d "$REPO_DIR" ]; then
+        log_info "Using existing repository at $REPO_DIR"
+        cd "$REPO_DIR"
+        git fetch origin
+        git checkout claude/debug-rag-query-F6HAr
+        git pull origin claude/debug-rag-query-F6HAr
+    else
+        log_info "Cloning to $REPO_DIR..."
+        git clone https://github.com/olivierolejniczak/Rag4DietPI.git "$REPO_DIR"
+        cd "$REPO_DIR"
+        git checkout claude/debug-rag-query-F6HAr
+    fi
+
+    log_ok "Repository ready at $REPO_DIR"
+    echo ""
+fi
+
+# Now verify we have the setup scripts
+if [ ! -f "setup-rag-core-v44.sh" ]; then
+    log_error "Setup scripts not found! Cannot continue."
     exit 1
 fi
+
+SCRIPT_DIR="$(pwd)"
+log_ok "Using scripts from: $SCRIPT_DIR"
+echo ""
 
 # Check prerequisites
 log_info "Checking prerequisites..."
@@ -199,9 +238,11 @@ if [ "$SKIP_SEARXNG" = true ]; then
     echo ""
 fi
 echo "Documentation:"
-echo "  - Fresh install guide: ~/Rag4DietPI/FRESH-INSTALL-GUIDE.md"
-echo "  - Fix guide: ~/Rag4DietPI/FIX-ALTICAP-QUERY.md"
-echo "  - Main README: ~/Rag4DietPI/README-v44.md"
+echo "  - Fresh install guide: $SCRIPT_DIR/FRESH-INSTALL-GUIDE.md"
+echo "  - Fix guide: $SCRIPT_DIR/FIX-ALTICAP-QUERY.md"
+echo "  - Main README: $SCRIPT_DIR/README-v44.md"
+echo ""
+echo "Repository location: $SCRIPT_DIR"
 echo ""
 log_ok "All done!"
 echo "============================================================================"
