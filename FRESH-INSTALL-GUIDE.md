@@ -49,6 +49,11 @@ git checkout claude/debug-rag-query-F6HAr  # Use the fixed branch
 ### Step 2: Run Setup Scripts
 
 ```bash
+# Make scripts executable
+chmod +x setup-rag-core-v44.sh
+chmod +x setup-rag-ingest-v44.sh
+chmod +x setup-rag-query-v44.sh
+
 # 1. Core setup (Qdrant, Ollama, config)
 ./setup-rag-core-v44.sh
 
@@ -129,6 +134,9 @@ echo "CRAG_ENABLED=false" >> config.env
 mkdir -p documents
 cp /path/to/your/files/* documents/
 
+# Make ingest script executable
+chmod +x ingest.sh
+
 # Run ingestion
 ./ingest.sh
 
@@ -171,6 +179,9 @@ Expected output:
 ### Step 6: Verify Installation
 
 ```bash
+# Make utility scripts executable
+chmod +x status.sh verify.sh
+
 # Check all services
 ./status.sh
 
@@ -186,6 +197,9 @@ Expected output:
 ### Step 7: Test Queries
 
 ```bash
+# Make query script executable
+chmod +x query.sh
+
 # Test 1: Content in your database
 ./query.sh "question about your documents"
 
@@ -424,6 +438,7 @@ After fresh install, if issues persist:
 
 1. Run diagnostics:
    ```bash
+   chmod +x diagnose-bm25.sh check-searxng.sh
    ./diagnose-bm25.sh
    ./check-searxng.sh
    ```
