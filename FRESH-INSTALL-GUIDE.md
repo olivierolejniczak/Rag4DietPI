@@ -67,12 +67,12 @@ sleep 30
 ./setup-rag-query-v44.sh
 ```
 
-### Step 3: Fix SearXNG (Critical)
+### Step 3: Install SearXNG (Optional but Recommended)
 
-The default SearXNG has bot detection issues. Use this workaround:
+SearXNG enables CRAG web search fallback for queries not in your database:
 
 ```bash
-# Option A: Run SearXNG with relaxed settings
+# Run SearXNG container
 docker run -d \
   --name searxng \
   -p 8085:8080 \
@@ -80,51 +80,27 @@ docker run -d \
   --restart unless-stopped \
   searxng/searxng:latest
 
+# Wait for startup
 sleep 20
 
-# Apply our header patch to web_search.py
-cd /root  # Or wherever query.sh was installed
-
-cat > /tmp/patch_websearch.py << 'EOF'
-with open('lib/web_search.py', 'r') as f:
-    content = f.read()
-
-old = '''        resp = requests.get(
-            searxng_url,
-            params=params,
-            timeout=timeout
-        )'''
-
-new = '''        resp = requests.get(
-            searxng_url,
-            params=params,
-            timeout=timeout,
-            headers={
-                'X-Forwarded-For': '127.0.0.1',
-                'X-Real-IP': '127.0.0.1',
-                'User-Agent': 'Mozilla/5.0 (RAGSystem/1.0)'
-            }
-        )'''
-
-content = content.replace(old, new)
-
-with open('lib/web_search.py', 'w') as f:
-    f.write(content)
-
-print("✓ Patched web_search.py with headers")
-EOF
-
-python3 /tmp/patch_websearch.py
+# Test it's working
+curl "http://localhost:8085/search?q=test&format=json" | head -100
 ```
 
-**OR Option B: Disable CRAG if SearXNG won't work**
+**Note**: The v44 setup script now includes:
+- ✅ Headers to bypass SearXNG bot detection
+- ✅ CRAG debug output in `--debug` mode
+- ✅ Proper error messages when SearXNG is unavailable
+- ✅ Fixed early-return bug that prevented CRAG from triggering
+
+**If you don't want web search**, disable CRAG:
 
 ```bash
 # In config.env
-echo "CRAG_ENABLED=false" >> config.env
+CRAG_ENABLED=false
 
-# Then queries won't try web search
-# You'll get LOW_CONFIDENCE for unknown queries instead
+# Or skip SearXNG installation entirely
+# System works fine without it, just no web fallback
 ```
 
 ### Step 4: Ingest Your Documents
@@ -140,40 +116,13 @@ cp /path/to/your/files/* documents/
 # This will:
 # - Process all documents
 # - Create vector embeddings
-# - Build BM25 index
+# - Build BM25 index automatically
 # - Create vocabulary
 ```
 
-### Step 5: Rebuild BM25 Index
+**Note**: Ingestion now builds BM25 index automatically. No separate rebuild needed unless troubleshooting.
 
-The BM25 rebuild script from our fixes:
-
-```bash
-cd /root  # Or installation directory
-
-# Copy rebuild script
-cp ~/Rag4DietPI/rebuild-bm25.sh .
-chmod +x rebuild-bm25.sh
-
-# Install rank-bm25 if needed
-pip3 install rank-bm25
-
-# Run rebuild
-./rebuild-bm25.sh
-```
-
-Expected output:
-```
-✓ Fetched XXX documents from Qdrant
-✓ Prepared XXX documents for indexing
-✓ BM25 index saved successfully
-  Location: /root/cache/bm25_index.pkl
-  Documents: XXX
-  Size: X.XX MB
-✓ Vocabulary saved: XXXX words
-```
-
-### Step 6: Verify Installation
+### Step 5: Verify Installation
 
 ```bash
 # Check all services (scripts already executable from setup)
@@ -188,7 +137,7 @@ Expected output:
 ./verify.sh
 ```
 
-### Step 7: Test Queries
+### Step 6: Test Queries
 
 ```bash
 # Test 1: Content in your database

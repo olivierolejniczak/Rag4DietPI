@@ -712,26 +712,37 @@ def evaluate_retrieval_quality(query, chunks, threshold=0.4):
     Evaluate if retrieved chunks are relevant enough.
     Returns: (is_sufficient, confidence_score)
     """
+    debug = os.environ.get("DEBUG", "false").lower() == "true"
+
     if not chunks:
+        if debug:
+            print(f"  [CRAG] No chunks to evaluate")
         return False, 0.0
-    
+
     # Simple heuristic: check keyword overlap and scores
     query_words = set(query.lower().split())
-    
+
     total_score = 0
     for chunk in chunks:
         text = chunk.get("text", "").lower() if isinstance(chunk, dict) else str(chunk).lower()
         chunk_words = set(text.split())
-        
+
         # Keyword overlap
         overlap = len(query_words & chunk_words) / max(len(query_words), 1)
-        
+
         # RRF/rerank score
         score = chunk.get("rrf_score", 0) or chunk.get("rerank_score", 0)
-        
+
         total_score += overlap * 0.5 + score * 0.5
-    
+
     avg_score = total_score / len(chunks)
+
+    if debug:
+        print(f"  [CRAG] Retrieval quality evaluation:")
+        print(f"    Chunks: {len(chunks)}")
+        print(f"    Score: {avg_score:.4f} | Threshold: {threshold}")
+        print(f"    Sufficient: {avg_score >= threshold}")
+
     return avg_score >= threshold, avg_score
 
 def crag_process(query, chunks, config):
@@ -739,17 +750,26 @@ def crag_process(query, chunks, config):
     CRAG: If retrieval quality is low, trigger web search.
     Returns: (chunks, web_triggered, web_results)
     """
+    debug = os.environ.get("DEBUG", "false").lower() == "true"
     threshold = config.get("crag_threshold", 0.4)
-    
+
     is_sufficient, score = evaluate_retrieval_quality(query, chunks, threshold)
-    
+
     if is_sufficient:
+        if debug:
+            print(f"    Decision: ✓ SUFFICIENT - no web search needed")
         return chunks, False, []
-    
+
+    if debug:
+        print(f"    Decision: ✗ INSUFFICIENT - triggering web search")
+
     # Trigger web search
     from web_search import search_web
     web_results = search_web(query, max_results=3)
-    
+
+    if debug:
+        print(f"  [WEB SEARCH] Got {len(web_results)} results from web")
+
     return chunks, True, web_results
 
 # ============================================================================
@@ -948,40 +968,43 @@ def post_process_retrieval(query, chunks, config):
     Main post-retrieval processing pipeline.
     Applies configured processing steps.
     """
-    if not chunks:
-        return chunks, False, []
-    
     web_triggered = False
     web_results = []
-    
+
+    # If no chunks, skip filters but still try CRAG
+    if not chunks:
+        if config.get("crag_enabled", False):
+            chunks, web_triggered, web_results = crag_process(query, chunks, config)
+        return chunks, web_triggered, web_results
+
     # 1. Relevance filter (fast, always run)
     if config.get("relevance_filter_enabled", True):
         threshold = config.get("relevance_threshold", 0.001)
         chunks = filter_by_relevance(chunks, threshold)
-    
+
     # 2. Diversity filter (fast)
     if config.get("diversity_filter_enabled", True):
         threshold = config.get("diversity_threshold", 0.85)
         chunks = filter_diverse(chunks, threshold)
-    
+
     # 3. Reranking (medium speed, ~3-5s)
     if config.get("rerank_enabled", False):
         top_k = config.get("rerank_top_k", 5)
         chunks = rerank_chunks(query, chunks, top_k)
-    
+
     # 4. CRAG check (may trigger web search)
     if config.get("crag_enabled", False):
         chunks, web_triggered, web_results = crag_process(query, chunks, config)
-    
+
     # 5. Context window expansion
     if config.get("context_window_enabled", False):
         window_size = config.get("context_window_size", 1)
         chunks = expand_context_window(chunks, window_size)
-    
+
     # 6. RSE
     if config.get("rse_enabled", False):
         chunks = apply_rse(query, chunks)
-    
+
     return chunks, web_triggered, web_results
 EOFPY
 log_ok "Post-retrieval module"
@@ -1178,7 +1201,12 @@ def search_web(query, max_results=5, timeout=None):
         resp = requests.get(
             searxng_url,
             params=params,
-            timeout=timeout
+            timeout=timeout,
+            headers={
+                'X-Forwarded-For': '127.0.0.1',
+                'X-Real-IP': '127.0.0.1',
+                'User-Agent': 'Mozilla/5.0 (RAGSystem/1.0)'
+            }
         )
         
         if resp.status_code != 200:
@@ -1235,14 +1263,33 @@ def search_web(query, max_results=5, timeout=None):
     except requests.exceptions.Timeout:
         search_record["error"] = f"Timeout ({timeout}s)"
         _web_debug["searches"].append(search_record)
+
+        # Show error in DEBUG mode
+        debug = os.environ.get("DEBUG", "false").lower() == "true"
+        if debug:
+            print(f"  [WEB SEARCH] ✗ Timeout after {timeout}s")
+
         return []
     except requests.exceptions.ConnectionError:
         search_record["error"] = "Connection failed - is SearXNG running?"
         _web_debug["searches"].append(search_record)
+
+        # Show error in DEBUG mode (not just DEBUG_WEB)
+        debug = os.environ.get("DEBUG", "false").lower() == "true"
+        if debug:
+            print(f"  [WEB SEARCH] ✗ SearXNG not accessible at {searxng_url}")
+            print(f"  [WEB SEARCH] Install: docker run -d -p 8085:8080 searxng/searxng")
+
         return []
     except Exception as e:
         search_record["error"] = str(e)
         _web_debug["searches"].append(search_record)
+
+        # Show error in DEBUG mode
+        debug = os.environ.get("DEBUG", "false").lower() == "true"
+        if debug:
+            print(f"  [WEB SEARCH] ✗ Error: {e}")
+
         return []
 
 def format_web_results(results):
