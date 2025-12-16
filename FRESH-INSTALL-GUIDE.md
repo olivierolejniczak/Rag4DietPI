@@ -134,10 +134,7 @@ echo "CRAG_ENABLED=false" >> config.env
 mkdir -p documents
 cp /path/to/your/files/* documents/
 
-# Make ingest script executable
-chmod +x ingest.sh
-
-# Run ingestion
+# Run ingestion (already executable from setup)
 ./ingest.sh
 
 # This will:
@@ -179,10 +176,7 @@ Expected output:
 ### Step 6: Verify Installation
 
 ```bash
-# Make utility scripts executable
-chmod +x status.sh verify.sh
-
-# Check all services
+# Check all services (scripts already executable from setup)
 ./status.sh
 
 # Should show:
@@ -197,9 +191,6 @@ chmod +x status.sh verify.sh
 ### Step 7: Test Queries
 
 ```bash
-# Make query script executable
-chmod +x query.sh
-
 # Test 1: Content in your database
 ./query.sh "question about your documents"
 
@@ -438,7 +429,11 @@ After fresh install, if issues persist:
 
 1. Run diagnostics:
    ```bash
+   # Copy diagnostic scripts from repo
+   cp ~/Rag4DietPI/diagnose-bm25.sh .
+   cp ~/Rag4DietPI/check-searxng.sh .
    chmod +x diagnose-bm25.sh check-searxng.sh
+
    ./diagnose-bm25.sh
    ./check-searxng.sh
    ```
