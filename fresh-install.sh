@@ -60,7 +60,9 @@ if [ ! -f "setup-rag-core-v44.sh" ]; then
         cd "$REPO_DIR"
         git fetch origin
         git checkout claude/debug-rag-query-F6HAr
-        git pull origin claude/debug-rag-query-F6HAr
+        # Reset any local changes or deleted files
+        git reset --hard origin/claude/debug-rag-query-F6HAr
+        log_ok "Repository updated and cleaned"
     else
         log_info "Cloning to $REPO_DIR..."
         git clone https://github.com/olivierolejniczak/Rag4DietPI.git "$REPO_DIR"
