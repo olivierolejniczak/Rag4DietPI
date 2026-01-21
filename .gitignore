@@ -1,0 +1,72 @@
+# RAG System .gitignore
+
+# Cache directories
+cache/
+.cache/
+
+# Ingestion tracking
+.ingest_tracking/
+
+# User documents (not committed)
+documents/
+
+# Environment and configuration (contains local settings)
+config.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+*.egg
+.venv/
+venv/
+ENV/
+
+# Logs
+*.log
+logs/
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Docker volumes (managed externally)
+qdrant_data/
+searxng_data/
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Model cache (large, downloaded at runtime)
+cache/fastembed/
+
+# Web UI sessions
+webui/sessions/
+
+# Test outputs
+test_results/
+evaluation_results/
