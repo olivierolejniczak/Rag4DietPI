@@ -158,7 +158,7 @@ def get_embedding(text, timeout=60, is_query=True):
         if resp.status_code == 200:
             return resp.json().get("embedding", [])
         return []
-    except:
+    except Exception:
         _debug_info["embedding_total_time"] += time.time() - start
         return []
 EOFPY
@@ -369,7 +369,7 @@ def get_cached_qdrant_results(query):
     if age > config["qdrant_ttl"]:
         try:
             os.remove(cache_file)
-        except:
+        except Exception:
             pass
         return None
     
@@ -449,7 +449,7 @@ def get_cached_response(query, context_hash=None):
     if age > config["response_ttl"]:
         try:
             os.remove(cache_file)
-        except:
+        except Exception:
             pass
         return None
     
@@ -539,7 +539,7 @@ def clear_cache(cache_type=None):
                 if f.endswith('.json'):
                     try:
                         os.remove(os.path.join(qdrant_dir, f))
-                    except:
+                    except Exception:
                         pass
     
     if cache_type in (None, 'response'):
@@ -549,7 +549,7 @@ def clear_cache(cache_type=None):
                 if f.endswith('.txt'):
                     try:
                         os.remove(os.path.join(response_dir, f))
-                    except:
+                    except Exception:
                         pass
 
 
@@ -576,7 +576,7 @@ def get_cache_stats():
                 try:
                     stats["qdrant_size"] += os.path.getsize(
                         os.path.join(config["qdrant_dir"], f))
-                except:
+                except Exception:
                     pass
     
     if os.path.exists(config["response_dir"]):
@@ -586,7 +586,7 @@ def get_cache_stats():
                 try:
                     stats["response_size"] += os.path.getsize(
                         os.path.join(config["response_dir"], f))
-                except:
+                except Exception:
                     pass
     
     return stats
@@ -814,7 +814,7 @@ def correct_word(word, speller):
             if word[0].isupper():
                 return correction.capitalize()
             return correction
-    except:
+    except Exception:
         pass
     
     return word
@@ -1388,7 +1388,7 @@ def get_embedding(text):
         )
         if resp.status_code == 200:
             return resp.json().get("embedding", [])
-    except:
+    except Exception:
         pass
     return []
 
@@ -1618,7 +1618,7 @@ def _get_dense_embedding(text):
         )
         if resp.status_code == 200:
             return resp.json().get("embedding", [])
-    except:
+    except Exception:
         pass
     return []
 
@@ -2108,7 +2108,7 @@ def expand_context_window(chunks, window_size=1):
                 expanded.append(expanded_chunk)
             else:
                 expanded.append(chunk)
-        except:
+        except Exception:
             expanded.append(chunk)
     
     return expanded
@@ -2449,7 +2449,7 @@ class ConversationMemory:
                 with open(self.file_path, 'r') as f:
                     data = json.load(f)
                     self.history = data.get("history", [])[-self.max_turns:]
-        except:
+        except Exception:
             self.history = []
     
     def _save(self):
@@ -2512,7 +2512,7 @@ class QueryCache:
                 
                 if time.time() - data.get("timestamp", 0) < self.ttl:
                     return data.get("result")
-        except:
+        except Exception:
             pass
         
         return None
@@ -2528,7 +2528,7 @@ class QueryCache:
                     "result": result,
                     "timestamp": time.time(),
                 }, f)
-        except:
+        except Exception:
             pass
     
     def clear(self):
@@ -2536,7 +2536,7 @@ class QueryCache:
         try:
             shutil.rmtree(self.cache_dir)
             os.makedirs(self.cache_dir, exist_ok=True)
-        except:
+        except Exception:
             pass
 EOFPY
 log_ok "query_cache.py"
@@ -2609,7 +2609,7 @@ def search_web(query, max_results=None):
                 print(f"  [WEB] HTTP error: {resp.status_code}")
                 try:
                     print(f"  [WEB] Response: {resp.text[:200]}")
-                except:
+                except Exception:
                     pass
     except Exception as e:
         debug = os.environ.get("DEBUG", "false").lower() == "true"

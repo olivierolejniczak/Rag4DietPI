@@ -271,14 +271,14 @@ def api_status():
             data = r.json()
             status["qdrant"] = True
             status["points"] = data.get("result", {}).get("points_count", 0)
-    except:
+    except Exception:
         pass
     
     try:
         r = requests.get(f"{config['ollama_host']}/api/tags", timeout=3)
         if r.status_code == 200:
             status["ollama"] = True
-    except:
+    except Exception:
         pass
     
     return jsonify(status)

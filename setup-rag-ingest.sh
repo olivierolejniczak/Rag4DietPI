@@ -986,7 +986,7 @@ def get_client_mode():
         resp = requests.get(f"{config['host']}/collections", timeout=5)
         if resp.status_code == 200:
             return "http"
-    except:
+    except Exception:
         pass
     
     return "unavailable"
@@ -1159,7 +1159,7 @@ def delete_collection_http(qdrant_host, collection_name):
     try:
         resp = requests.delete(url, timeout=30)
         return resp.status_code in [200, 404]
-    except:
+    except Exception:
         return False
 
 def delete_collection(collection_name):
@@ -1811,7 +1811,7 @@ def detect_column_type(col_name, sample_values):
                 try:
                     float(str(v).replace(',', '.').replace(' ', ''))
                     numeric_count += 1
-                except:
+                except Exception:
                     pass
         if numeric_count > 5:
             return 'numeric'
@@ -2458,7 +2458,7 @@ def parse_xml(file_path):
         try:
             with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
                 return f.read(), {"parser": "xml_raw", "error": str(e)}
-        except:
+        except Exception:
             return "", {"error": str(e)}
 
 
@@ -2473,7 +2473,7 @@ def parse_yaml(file_path):
         # Parse YAML
         try:
             data = yaml.safe_load(content)
-        except:
+        except Exception:
             # If parsing fails, return raw content
             return content, {"parser": "yaml_raw"}
         
@@ -2724,7 +2724,7 @@ def parse_ini(file_path):
         try:
             with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
                 return f.read(), {"parser": "ini_raw", "error": str(e)}
-        except:
+        except Exception:
             return "", {"error": str(e)}
 
 
@@ -2778,7 +2778,7 @@ def parse_extended_format(file_path):
             import json
             text = json.dumps(data, indent=2)
             return text, {"parser": "toml", "filename": os.path.basename(file_path)}
-        except:
+        except Exception:
             with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
                 return f.read(), {"parser": "toml_raw"}
     
@@ -3134,7 +3134,7 @@ def ingest_directory(docs_dir, qdrant_host, collection_name, chunk_size=500,
             file_size = os.path.getsize(file_path)
             if file_size > 1024 * 1024:  # > 1MB
                 print(f" ({file_size // (1024*1024)}MB)", end="", flush=True)
-        except:
+        except Exception:
             pass
         
         result = ingest_file(
@@ -3323,7 +3323,7 @@ def is_valid_url(url, base_domain, config):
                 return False
         
         return True
-    except:
+    except Exception:
         return False
 
 def extract_links(html, base_url):
@@ -3413,7 +3413,7 @@ def extract_title(html):
         h1_tag = soup.find("h1")
         if h1_tag:
             return h1_tag.get_text().strip()
-    except:
+    except Exception:
         pass
     
     # Regex fallback
