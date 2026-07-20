@@ -137,7 +137,7 @@ def get_embedding(text, timeout=60, is_query=True):
             if is_fastembed_available():
                 embedding = fe_embed(text[:8000])
                 if embedding:
-                    _debug_info["embedding_model"] = os.environ.get("FASTEMBED_MODEL", "BAAI/bge-small-en-v1.5")
+                    _debug_info["embedding_model"] = os.environ.get("FASTEMBED_MODEL", "BAAI/bge-base-en-v1.5")
                     _debug_info["embedding_total_time"] += time.time() - start
                     return embedding
         except ImportError:

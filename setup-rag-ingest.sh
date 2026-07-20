@@ -452,7 +452,7 @@ def get_embedding(text, model_name=None):
     global _model, _model_name
     
     if model_name is None:
-        model_name = os.environ.get("FASTEMBED_MODEL", "BAAI/bge-small-en-v1.5")
+        model_name = os.environ.get("FASTEMBED_MODEL", "BAAI/bge-base-en-v1.5")
     
     # Lazy load model
     if _model is None or _model_name != model_name:
@@ -479,7 +479,7 @@ def get_embeddings_batch(texts, model_name=None, batch_size=32):
     global _model, _model_name
     
     if model_name is None:
-        model_name = os.environ.get("FASTEMBED_MODEL", "BAAI/bge-small-en-v1.5")
+        model_name = os.environ.get("FASTEMBED_MODEL", "BAAI/bge-base-en-v1.5")
     
     if _model is None or _model_name != model_name:
         from fastembed import TextEmbedding
@@ -493,14 +493,14 @@ def get_embeddings_batch(texts, model_name=None, batch_size=32):
 def get_embedding_dimension(model_name=None):
     """Get embedding dimension for model"""
     if model_name is None:
-        model_name = os.environ.get("FASTEMBED_MODEL", "BAAI/bge-small-en-v1.5")
+        model_name = os.environ.get("FASTEMBED_MODEL", "BAAI/bge-base-en-v1.5")
     
     dimensions = {
         "BAAI/bge-small-en-v1.5": 384,
         "BAAI/bge-base-en-v1.5": 768,
         "BAAI/bge-large-en-v1.5": 1024,
     }
-    return dimensions.get(model_name, 384)
+    return dimensions.get(model_name, 768)
 EOFPY
 log_ok "embedding_helper.py"
 
@@ -1034,7 +1034,7 @@ def get_sparse_embedding(text, model_name=None):
         return None
     
     if model_name is None:
-        model_name = os.environ.get("SPARSE_EMBED_MODEL", "Qdrant/bm25")
+        model_name = os.environ.get("SPARSE_EMBED_MODEL", "prithivida/Splade_PP_en_v1")
     
     # Lazy load model
     if _sparse_model is None or _sparse_model_name != model_name:
@@ -1074,7 +1074,7 @@ def get_sparse_embeddings_batch(texts, model_name=None, batch_size=32):
         return [None] * len(texts)
     
     if model_name is None:
-        model_name = os.environ.get("SPARSE_EMBED_MODEL", "Qdrant/bm25")
+        model_name = os.environ.get("SPARSE_EMBED_MODEL", "prithivida/Splade_PP_en_v1")
     
     if _sparse_model is None or _sparse_model_name != model_name:
         from fastembed import SparseTextEmbedding
@@ -1097,7 +1097,7 @@ def get_sparse_model_info():
     Returns:
         dict: Model info or None
     """
-    model_name = os.environ.get("SPARSE_EMBED_MODEL", "Qdrant/bm25")
+    model_name = os.environ.get("SPARSE_EMBED_MODEL", "prithivida/Splade_PP_en_v1")
     return {
         "model": model_name,
         "available": is_sparse_embed_available(),
@@ -1130,7 +1130,7 @@ def _get_hybrid_config():
         "dense_name": os.environ.get("DENSE_VECTOR_NAME", "dense"),
         "sparse_name": os.environ.get("SPARSE_VECTOR_NAME", "sparse"),
         "sparse_enabled": os.environ.get("SPARSE_EMBED_ENABLED", "true").lower() == "true",
-        "dimension": int(os.environ.get("EMBEDDING_DIMENSION", "384")),
+        "dimension": int(os.environ.get("EMBEDDING_DIMENSION", "768")),
         "batch_size": int(os.environ.get("QDRANT_BATCH_SIZE", "100")),
     }
 
@@ -3006,8 +3006,11 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
     if sparse_enabled and is_sparse_embed_available():
         sparse_embeddings = get_sparse_embeddings_batch(texts)
     
-    # Prepare points for Qdrant
-    base_id = int(hashlib.md5(file_path.encode()).hexdigest()[:8], 16)
+    # Prepare points for Qdrant. Use a 60-bit file hash (15 hex chars): it
+    # leaves headroom for the +chunk_index offset below while making cross-file
+    # id collisions negligible. The old 8-hex/32-bit id collided within tens of
+    # thousands of files (two files could silently overwrite each other's points).
+    base_id = int(hashlib.md5(file_path.encode()).hexdigest()[:15], 16)
     
     if sparse_enabled and sparse_embeddings:
         # Hybrid points with named vectors (hybrid)
@@ -3026,7 +3029,7 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
                     "chunk_type": chunk.get("type", "unknown"),
                     "char_count": chunk.get("char_count", len(chunk["text"])),
                     "parser": "unstructured",
-                    "sparse_model": os.environ.get("SPARSE_EMBED_MODEL", "Qdrant/bm25"),
+                    "sparse_model": os.environ.get("SPARSE_EMBED_MODEL", "prithivida/Splade_PP_en_v1"),
                     "ingested_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 }
             })
@@ -3070,7 +3073,7 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
         "parser": "unstructured",
         "dimension": dimension,
         "sparse_enabled": sparse_enabled and sparse_embeddings is not None,
-        "sparse_model": os.environ.get("SPARSE_EMBED_MODEL", "Qdrant/bm25") if sparse_embeddings else None,
+        "sparse_model": os.environ.get("SPARSE_EMBED_MODEL", "prithivida/Splade_PP_en_v1") if sparse_embeddings else None,
     })
     
     # dedup: Mark document content as ingested for dedup
