@@ -1661,18 +1661,22 @@ def _hybrid_search_client(query, top_k=5, hyde_embedding=None):
         
         sparse_vector = _get_sparse_embedding(query)
         
-        # Extract host
-        host = config["host"].replace("http://", "").replace("https://", "")
-        if ":" in host:
-            host = host.split(":")[0]
-        
-        client = QdrantClient(
-            host=host,
-            grpc_port=int(os.environ.get("QDRANT_GRPC_PORT", "6334")),
-            prefer_grpc=True,
-            timeout=30,
-        )
-        
+        # Reuse the pooled gRPC client instead of opening a new channel on every
+        # query -- multipass fires several searches per request.
+        from qdrant_client_helper import get_client
+        client, _mode = get_client()
+        if client is None:
+            # Pool disabled/unavailable -- fall back to a direct connection.
+            host = config["host"].replace("http://", "").replace("https://", "")
+            if ":" in host:
+                host = host.split(":")[0]
+            client = QdrantClient(
+                host=host,
+                grpc_port=int(os.environ.get("QDRANT_GRPC_PORT", "6334")),
+                prefer_grpc=True,
+                timeout=30,
+            )
+
         # Build prefetch queries
         prefetch = [
             models.Prefetch(
