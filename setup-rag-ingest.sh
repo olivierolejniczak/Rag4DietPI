@@ -3349,33 +3349,51 @@ def extract_links(html, base_url):
     
     return links
 
-def extract_text(html, url):
-    """Extract clean text from HTML"""
-    try:
-        import html2text
-        h = html2text.HTML2Text()
-        h.ignore_links = False
-        h.ignore_images = True
-        h.ignore_emphasis = False
-        h.body_width = 0  # No wrapping
-        text = h.handle(html)
-        return text.strip()
-    except ImportError:
-        pass
-    
+# Tags whose contents are navigation / chrome / scripts, not article text.
+_NOISE_TAGS = ["script", "style", "nav", "footer", "header", "aside", "form", "noscript", "svg"]
+
+def _strip_noise(html):
+    """Remove nav/chrome/script elements, returning cleaned HTML.
+
+    Falls back to the original HTML if BeautifulSoup is unavailable.
+    """
     try:
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html, "lxml")
-        
-        # Remove script, style, nav, footer
-        for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+        for tag in soup(_NOISE_TAGS):
             tag.decompose()
-        
+        # Common menu / banner / decorative containers by ARIA role.
+        for el in soup.select('[role="navigation"], [role="banner"], [aria-hidden="true"]'):
+            el.decompose()
+        return str(soup)
+    except Exception:
+        return html
+
+def extract_text(html, url):
+    """Extract clean article text from HTML, stripping nav/chrome first."""
+    cleaned = _strip_noise(html)
+    try:
+        import html2text
+        h = html2text.HTML2Text()
+        h.ignore_links = True   # keep anchor text, drop noisy "(url)" tails
+        h.ignore_images = True
+        h.ignore_emphasis = False
+        h.body_width = 0        # No wrapping
+        text = h.handle(cleaned)
+        # Collapse blank lines left behind by the stripped chrome.
+        lines = [ln.rstrip() for ln in text.split("\n")]
+        return "\n".join(ln for ln in lines if ln.strip()).strip()
+    except ImportError:
+        pass
+
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(cleaned, "lxml")
         text = soup.get_text(separator="\n", strip=True)
         # Clean up whitespace
         lines = [line.strip() for line in text.split("\n") if line.strip()]
         return "\n".join(lines)
-    except:
+    except Exception:
         # Last resort: strip tags with regex
         text = re.sub(r'<[^>]+>', ' ', html)
         text = re.sub(r'\s+', ' ', text)
@@ -3468,85 +3486,93 @@ def chunk_text(text, chunk_size=500, overlap=50):
     return chunks
 
 def ingest_to_qdrant(chunks, url, title, config):
-    """Ingest chunks into Qdrant"""
+    """Ingest chunks into Qdrant as hybrid (dense + sparse) points.
+
+    Web pages now go through the same dense+sparse embedding path as file
+    ingestion, so they are fully hybrid-searchable. Previously they were
+    dense-only and could never match the sparse/keyword arm of RRF fusion.
+    """
     try:
-        from qdrant_client import QdrantClient
-        from qdrant_client.models import PointStruct
-        from fastembed import TextEmbedding
+        from embedding_helper import get_embeddings_batch
+        from qdrant_hybrid_helper import ensure_hybrid_collection, upload_hybrid_points
+        from qdrant_client_helper import check_collection_status
     except ImportError as e:
         print(f"  [ERROR] Missing dependency: {e}", file=sys.stderr)
         return 0
-    
-    # Connect to Qdrant
-    try:
-        # Try gRPC first
-        host = config["qdrant_host"].replace("http://", "").replace("https://", "").split(":")[0]
-        client = QdrantClient(host=host, port=config["qdrant_grpc_port"], prefer_grpc=True)
-    except:
-        # Fallback to HTTP
-        client = QdrantClient(url=config["qdrant_host"])
-    
-    # Get embedding model
-    model_name = os.environ.get("FASTEMBED_MODEL", "BAAI/bge-small-en-v1.5")
-    cache_dir = os.environ.get("FASTEMBED_CACHE_DIR", "./cache/fastembed")
-    embed_model = TextEmbedding(model_name=model_name, cache_dir=cache_dir)
-    
-    # Generate embeddings
+
+    sparse_enabled = os.environ.get("SPARSE_EMBED_ENABLED", "true").lower() == "true"
+    use_sparse = False
+    if sparse_enabled:
+        try:
+            from sparse_embedding_helper import get_sparse_embeddings_batch, is_sparse_embed_available
+            use_sparse = is_sparse_embed_available()
+        except ImportError:
+            use_sparse = False
+
+    # Embed all chunks: dense always, sparse when enabled (same models/env as
+    # file ingestion via the shared helpers).
     texts = [c for c in chunks]
-    embeddings = list(embed_model.embed(texts))
-    
-    # Prepare points
-    points = []
+    dense_embeddings = get_embeddings_batch(texts)
+    if not dense_embeddings:
+        return 0
+    sparse_embeddings = (
+        get_sparse_embeddings_batch(texts) if use_sparse else [None] * len(texts)
+    )
+
+    # Keep EMBEDDING_DIMENSION in sync with the model we actually used, then
+    # make sure a compatible hybrid collection exists.
+    dim = len(dense_embeddings[0])
+    os.environ["EMBEDDING_DIMENSION"] = str(dim)
+    collection = config["collection_name"]
+
+    status = check_collection_status(collection, expected_dim=dim, expect_sparse=use_sparse)
+    if status["status"] == "unreachable":
+        print(f"  [ERROR] Qdrant unreachable: {status['detail']}", file=sys.stderr)
+        return 0
+    if status["status"] in ("dim_mismatch", "schema_mismatch"):
+        # A pre-existing incompatible collection can never accept our points;
+        # drop it so ensure_hybrid_collection recreates it correctly.
+        print(f"  [WARN] Recreating '{collection}': {status['detail']}", file=sys.stderr)
+        try:
+            import requests
+            requests.delete(f"{config['qdrant_host']}/collections/{collection}", timeout=30)
+        except Exception:
+            pass
+
+    try:
+        ensure_hybrid_collection(collection)
+    except Exception as e:
+        print(f"  [WARN] Could not ensure collection '{collection}': {e}", file=sys.stderr)
+        return 0
+
     parsed_url = urlparse(url)
     domain = parsed_url.netloc
-    
-    for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-        point_id = hashlib.md5(f"{url}:{i}".encode()).hexdigest()
-        point_id_int = int(point_id[:16], 16)  # Convert to int for Qdrant
-        
-        points.append(PointStruct(
-            id=point_id_int,
-            vector={"dense": embedding.tolist()},
-            payload={
+
+    points = []
+    for i, chunk in enumerate(chunks):
+        point_id = int(hashlib.md5(f"{url}:{i}".encode()).hexdigest()[:16], 16)
+        points.append({
+            "id": point_id,
+            "dense_vector": dense_embeddings[i],
+            "sparse_vector": sparse_embeddings[i],
+            "payload": {
                 "text": chunk,
                 "filename": title or parsed_url.path or domain,
+                "filepath": url,
                 "source": "web",
+                "chunk_type": "web",
                 "url": url,
                 "domain": domain,
                 "chunk_index": i,
                 "total_chunks": len(chunks),
                 "crawled_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            }
-        ))
-    
-    # Upsert to collection (auto-create it if it doesn't exist yet).
-    # Derive the dimension from the embeddings we just produced so the
-    # collection always matches this model's vectors, regardless of config.
-    collection = config["collection_name"]
-    dense_name = os.environ.get("DENSE_VECTOR_NAME", "dense")
-    try:
-        from qdrant_hybrid_helper import ensure_hybrid_collection
-        if embeddings:
-            dim = len(embeddings[0])
-            os.environ["EMBEDDING_DIMENSION"] = str(dim)
-            # If the collection already exists with an incompatible dense
-            # dimension, it can never accept our vectors -- drop it so it is
-            # recreated below at the correct size.
-            try:
-                existing = client.get_collection(collection)
-                vectors = existing.config.params.vectors
-                existing_dim = vectors[dense_name].size if isinstance(vectors, dict) else vectors.size
-                if existing_dim != dim:
-                    print(f"  [WARN] Collection '{collection}' has dim {existing_dim}, "
-                          f"expected {dim}; recreating", file=sys.stderr)
-                    client.delete_collection(collection)
-            except Exception:
-                # Collection doesn't exist yet (or has no dense vector) -- ensure creates it.
-                pass
-        ensure_hybrid_collection(collection)
-    except Exception as e:
-        print(f"  [WARN] Could not ensure collection '{collection}': {e}", file=sys.stderr)
-    client.upsert(collection_name=collection, points=points)
+            },
+        })
+
+    batch_size = int(os.environ.get("QDRANT_BATCH_SIZE", "48"))
+    if not upload_hybrid_points(collection, points, batch_size=batch_size):
+        print(f"  [WARN] Hybrid upload failed for {url}", file=sys.stderr)
+        return 0
 
     return len(points)
 
