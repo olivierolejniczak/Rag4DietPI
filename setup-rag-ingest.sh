@@ -864,7 +864,7 @@ def ensure_collection_http(qdrant_host, collection_name, dimension):
     url = f"{qdrant_host}/collections/{collection_name}"
     
     # Check if exists
-    resp = requests.get(url)
+    resp = requests.get(url, timeout=30)
     if resp.status_code == 200:
         return True
     
@@ -875,14 +875,14 @@ def ensure_collection_http(qdrant_host, collection_name, dimension):
             "distance": "Cosine"
         }
     }
-    resp = requests.put(url, json=payload)
+    resp = requests.put(url, json=payload, timeout=30)
     return resp.status_code == 200
 
 def upload_points_http(qdrant_host, collection_name, points):
     """Upload points to Qdrant via HTTP (legacy)"""
     url = f"{qdrant_host}/collections/{collection_name}/points"
     payload = {"points": points}
-    resp = requests.put(url, json=payload, params={"wait": "true"})
+    resp = requests.put(url, json=payload, params={"wait": "true"}, timeout=30)
     return resp.status_code == 200
 
 def search_points_http(qdrant_host, collection_name, query_vector, limit=5, score_threshold=None):
@@ -896,7 +896,7 @@ def search_points_http(qdrant_host, collection_name, query_vector, limit=5, scor
     if score_threshold is not None:
         payload["score_threshold"] = score_threshold
     
-    resp = requests.post(url, json=payload)
+    resp = requests.post(url, json=payload, timeout=30)
     if resp.status_code != 200:
         return None
     
@@ -1157,7 +1157,7 @@ def delete_collection_http(qdrant_host, collection_name):
     """Delete collection via HTTP"""
     url = f"{qdrant_host}/collections/{collection_name}"
     try:
-        resp = requests.delete(url)
+        resp = requests.delete(url, timeout=30)
         return resp.status_code in [200, 404]
     except:
         return False
@@ -1218,7 +1218,7 @@ def ensure_hybrid_collection_http(qdrant_host, collection_name, dimension, dense
     url = f"{qdrant_host}/collections/{collection_name}"
     
     # Check if exists
-    resp = requests.get(url)
+    resp = requests.get(url, timeout=30)
     if resp.status_code == 200:
         return True
     
@@ -1234,7 +1234,7 @@ def ensure_hybrid_collection_http(qdrant_host, collection_name, dimension, dense
             sparse_name: {}
         }
     }
-    resp = requests.put(url, json=payload)
+    resp = requests.put(url, json=payload, timeout=30)
     return resp.status_code == 200
 
 def ensure_hybrid_collection(collection_name=None):
@@ -1345,7 +1345,7 @@ def upload_hybrid_points_http(qdrant_host, collection_name, points, dense_name, 
         })
     
     payload = {"points": http_points}
-    resp = requests.put(url, json=payload, params={"wait": "true"})
+    resp = requests.put(url, json=payload, params={"wait": "true"}, timeout=30)
     return resp.status_code == 200
 
 def upload_hybrid_points(collection_name, points, batch_size=100):

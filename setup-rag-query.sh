@@ -61,7 +61,7 @@ def reset_debug_info():
 def get_config():
     return {
         "ollama_host": os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
-        "llm_model": os.environ.get("LLM_MODEL", "qwen2.5:1.5b"),
+        "llm_model": os.environ.get("LLM_MODEL", "qwen2.5:3b"),
         "embedding_model": os.environ.get("EMBEDDING_MODEL", "nomic-embed-text"),
         "timeout_default": int(os.environ.get("LLM_TIMEOUT_OVERRIDE", os.environ.get("LLM_TIMEOUT_DEFAULT", "180"))),
         "timeout_ultrafast": int(os.environ.get("LLM_TIMEOUT_ULTRAFAST", "90")),
@@ -2648,7 +2648,7 @@ def get_config():
         "max_results": int(os.environ.get("WEB_ONLY_MAX_RESULTS", "5")),
         "llm_timeout": int(os.environ.get("WEB_ONLY_TIMEOUT", "60")),
         "ollama_host": os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
-        "llm_model": os.environ.get("LLM_MODEL", "qwen2.5:1.5b"),
+        "llm_model": os.environ.get("LLM_MODEL", "qwen2.5:3b"),
         "temperature": float(os.environ.get("TEMPERATURE", "0.2")),
         "num_predict": int(os.environ.get("NUM_PREDICT_DEFAULT", "800")),
         "verbose": os.environ.get("VERBOSE", "").lower() == "true",
@@ -2806,7 +2806,7 @@ def _get_config():
         "sample_size": int(os.environ.get("RAGAS_SAMPLE_SIZE", "10")),
         "dataset_path": os.environ.get("RAGAS_DATASET_PATH", "./cache/ragas_test.json"),
         "sla_threshold": float(os.environ.get("RAGAS_SLA_THRESHOLD", "0.80")),
-        "llm_model": os.environ.get("RAGAS_LLM_MODEL", os.environ.get("LLM_MODEL", "qwen2.5:1.5b")),
+        "llm_model": os.environ.get("RAGAS_LLM_MODEL", os.environ.get("LLM_MODEL", "qwen2.5:3b")),
         "ollama_host": os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
         "debug": os.environ.get("DEBUG", "").lower() == "true",
     }
@@ -3369,7 +3369,7 @@ def get_llm_response(prompt: str, timeout: int = None) -> str:
     import requests
     
     ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-    model = os.environ.get("LLM_MODEL", "qwen2.5:1.5b")
+    model = os.environ.get("LLM_MODEL", "qwen2.5:3b")
     timeout = timeout or int(os.environ.get("MAPREDUCE_CHUNK_TIMEOUT", "120"))
     
     try:
@@ -3603,7 +3603,7 @@ def get_llm_response(prompt: str, timeout: int = 120) -> str:
     import requests
     
     ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-    model = os.environ.get("LLM_MODEL", "qwen2.5:1.5b")
+    model = os.environ.get("LLM_MODEL", "qwen2.5:3b")
     
     try:
         response = requests.post(
@@ -3863,7 +3863,7 @@ def get_llm_response(prompt: str, timeout: int = 180) -> str:
     import requests
     
     ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-    model = os.environ.get("LLM_MODEL", "qwen2.5:1.5b")
+    model = os.environ.get("LLM_MODEL", "qwen2.5:3b")
     
     try:
         response = requests.post(
@@ -5106,7 +5106,7 @@ export SEARXNG_TIMEOUT="${SEARXNG_TIMEOUT:-15}"
 export WEB_ONLY_MAX_RESULTS="${WEB_ONLY_MAX_RESULTS:-5}"
 export WEB_ONLY_TIMEOUT="${WEB_ONLY_TIMEOUT:-60}"
 export OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
-export LLM_MODEL="${LLM_MODEL:-qwen2.5:1.5b}"
+export LLM_MODEL="${LLM_MODEL:-qwen2.5:3b}"
 export TEMPERATURE="${TEMPERATURE:-0.2}"
 export NUM_PREDICT_DEFAULT="${NUM_PREDICT_DEFAULT:-800}"
 
@@ -5163,7 +5163,7 @@ echo "Request: $QUERY"
 echo ""
 
 export OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
-export LLM_MODEL="${LLM_MODEL:-qwen2.5:1.5b}"
+export LLM_MODEL="${LLM_MODEL:-qwen2.5:3b}"
 export MAPREDUCE_CHUNK_SIZE="${MAPREDUCE_CHUNK_SIZE:-4000}"
 export MAPREDUCE_BATCH_SIZE="${MAPREDUCE_BATCH_SIZE:-3}"
 export MAPREDUCE_CHUNK_TIMEOUT="${MAPREDUCE_CHUNK_TIMEOUT:-120}"
@@ -5217,7 +5217,7 @@ echo "Extract: $QUERY"
 echo ""
 
 export OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
-export LLM_MODEL="${LLM_MODEL:-qwen2.5:1.5b}"
+export LLM_MODEL="${LLM_MODEL:-qwen2.5:3b}"
 export EXTRACTION_CHUNK_SIZE="${EXTRACTION_CHUNK_SIZE:-3000}"
 export EXTRACTION_DEDUP_THRESHOLD="${EXTRACTION_DEDUP_THRESHOLD:-0.85}"
 
