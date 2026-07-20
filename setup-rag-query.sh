@@ -2157,7 +2157,12 @@ def generate_answer(query, chunks, memory_context="", config=None):
     max_context = config.get("max_context_chars", 5000)
     max_tokens = config.get("num_predict", 500)
     citations_enabled = config.get("citations", False)
-    
+
+    # Answer language (default French). Set ANSWER_LANG=en for English, etc.
+    lang_names = {"fr": "French", "en": "English", "es": "Spanish", "de": "German", "it": "Italian"}
+    answer_lang = config.get("answer_lang") or os.environ.get("ANSWER_LANG", "fr")
+    lang_instruction = f" Answer in {lang_names.get(answer_lang, answer_lang)}."
+
     # cache: Separate web and RAG chunks, prioritize web when CRAG triggered
     web_chunks = [c for c in chunks if isinstance(c, dict) and c.get("chunk_type") == "web"]
     rag_chunks = [c for c in chunks if not (isinstance(c, dict) and c.get("chunk_type") == "web")]
@@ -2195,7 +2200,7 @@ Information:
 
 Question: {query}
 
-Provide a concise, factual answer based on the information above."""
+Provide a concise, factual answer based on the information above.{lang_instruction}"""
     else:
         # Standard RAG prompt (slightly relaxed from original)
         prompt = f"""Answer the question using the document context provided below.
@@ -2205,7 +2210,7 @@ Question: {query}
 Document context:
 {context}
 
-Provide a concise answer based on the context. If the context doesn't contain relevant information, say so briefly."""
+Provide a concise answer based on the context. If the context doesn't contain relevant information, say so briefly.{lang_instruction}"""
     
     if citations_enabled:
         prompt += "\nCite sources using [1], [2], etc."
@@ -4380,7 +4385,20 @@ def main(query):
                 print("[CACHE] Hit")
             print(cached)
             return
-    
+
+    # Fail fast with a clear message if the collection is not queryable, rather
+    # than returning a bare "No relevant documents found." for every failure.
+    from qdrant_client_helper import check_collection_status
+    coll_status = check_collection_status()
+    if coll_status["status"] == "unreachable":
+        print(f"[ERROR] Qdrant is unreachable: {coll_status['detail']}")
+        print("Check services with: ./status.sh")
+        return
+    if coll_status["status"] == "missing":
+        print(f"[ERROR] {coll_status['detail']}")
+        print("Ingest documents first with: ./ingest.sh")
+        return
+
     # Get memory context (only if relevant to current query)
     memory = ConversationMemory() if config["memory_enabled"] else None
     memory_context = ""
@@ -4734,6 +4752,7 @@ cd "$(dirname "$0")"
 source ./config.env 2>/dev/null || true
 
 export OLLAMA_HOST LLM_MODEL TEMPERATURE QDRANT_HOST QDRANT_GRPC_PORT COLLECTION_NAME
+export ANSWER_LANG
 export SPARSE_EMBED_ENABLED HYBRID_SEARCH_MODE FASTEMBED_MODEL
 export SEARXNG_URL WEB_SEARCH_ENABLED
 export CRAG_ENABLED CRAG_THRESHOLD

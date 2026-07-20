@@ -811,6 +811,9 @@ CSV_NL_TRANSFORM_ENABLED=true
 CSV_NL_DUAL_MODE=true
 CSV_NL_LANG=fr
 
+# Answer language for generated RAG responses (fr, en, es, de, it)
+ANSWER_LANG=fr
+
 # Website Ingestion (web)
 WEB_CRAWLER_ENABLED=true
 WEB_CRAWLER_MAX_PAGES=50

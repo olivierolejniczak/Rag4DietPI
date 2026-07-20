@@ -533,6 +533,95 @@ def _get_config():
         "batch_size": int(os.environ.get("QDRANT_BATCH_SIZE", "100")),
     }
 
+def check_collection_status(collection_name=None, expected_dim=None, expect_sparse=None):
+    """Inspect a collection and report a precise, actionable status.
+
+    Uses the HTTP API so it works even when qdrant-client is not installed.
+
+    Returns:
+        dict: {"status": ..., "detail": ...} where status is one of
+              "ok", "missing", "unreachable", "dim_mismatch", "schema_mismatch".
+    """
+    config = _get_config()
+    if collection_name is None:
+        collection_name = config["collection"]
+
+    url = f"{config['host']}/collections/{collection_name}"
+    try:
+        resp = requests.get(url, timeout=5)
+    except Exception as e:
+        return {"status": "unreachable", "detail": str(e)}
+
+    if resp.status_code == 404:
+        return {"status": "missing", "detail": f"collection '{collection_name}' does not exist"}
+    if resp.status_code != 200:
+        return {"status": "unreachable", "detail": f"HTTP {resp.status_code}"}
+
+    try:
+        params = resp.json()["result"]["config"]["params"]
+    except Exception as e:
+        return {"status": "unreachable", "detail": f"unexpected response: {e}"}
+
+    vectors = params.get("vectors", {}) or {}
+    sparse_vectors = params.get("sparse_vectors", {}) or {}
+    dense_name = os.environ.get("DENSE_VECTOR_NAME", "dense")
+
+    # A hybrid collection exposes named vectors ({name: {size,...}}); a
+    # dense-only collection exposes a flat {size, distance} object.
+    if isinstance(vectors, dict) and "size" in vectors:
+        actual_dim = vectors.get("size")
+        has_named = False
+    else:
+        has_named = True
+        dv = vectors.get(dense_name) if isinstance(vectors, dict) else None
+        actual_dim = dv.get("size") if isinstance(dv, dict) else None
+
+    has_sparse = bool(sparse_vectors)
+
+    if expect_sparse is not None:
+        if expect_sparse and not (has_named and has_sparse):
+            return {"status": "schema_mismatch",
+                    "detail": "existing collection is dense-only but sparse hybrid is enabled "
+                              "(recreate with: ./ingest.sh --recreate)"}
+        if not expect_sparse and has_named:
+            return {"status": "schema_mismatch",
+                    "detail": "existing collection uses hybrid named vectors but sparse is disabled "
+                              "(recreate with: ./ingest.sh --recreate)"}
+
+    if expected_dim is not None and actual_dim is not None and int(actual_dim) != int(expected_dim):
+        return {"status": "dim_mismatch",
+                "detail": f"existing collection dimension {actual_dim} != model dimension "
+                          f"{expected_dim} (recreate with: ./ingest.sh --recreate)"}
+
+    return {"status": "ok", "detail": f"dim={actual_dim}, sparse={has_sparse}"}
+
+def delete_orphan_chunks(collection_name, file_path, keep_count):
+    """Delete stale points for a file whose chunk_index >= keep_count.
+
+    When a document is re-ingested with fewer chunks than a previous version,
+    the old higher-index points would otherwise remain as orphaned, searchable
+    stale data. Deleting only the tail (index >= keep_count) is safe: the chunks
+    we re-upsert (index 0..keep_count-1) are overwritten by id, so this never
+    removes current content even if it runs after a partial upload.
+
+    Returns True on success (or when there is nothing to delete).
+    """
+    config = _get_config()
+    url = f"{config['host']}/collections/{collection_name}/points/delete"
+    payload = {
+        "filter": {
+            "must": [
+                {"key": "filepath", "match": {"value": file_path}},
+                {"key": "chunk_index", "range": {"gte": keep_count}},
+            ]
+        }
+    }
+    try:
+        resp = requests.post(url, json=payload, params={"wait": "true"}, timeout=30)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
 def is_client_available():
     """Check if qdrant-client is installed"""
     try:
@@ -2788,6 +2877,8 @@ from qdrant_client_helper import (
     ensure_collection,
     upload_points,
     get_client_mode,
+    check_collection_status,
+    delete_orphan_chunks,
 )
 
 # dedup: Document-level dedup
@@ -2888,8 +2979,18 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
     
     # Ensure collection exists (hybrid: hybrid collection with named vectors)
     dimension = get_embedding_dimension()
-    
-    if sparse_enabled and is_sparse_embed_available():
+    use_sparse = sparse_enabled and is_sparse_embed_available()
+
+    # Validate an existing collection matches our model/schema before writing.
+    # A mismatch otherwise causes silent upsert failures, so fail loudly with
+    # guidance instead of reporting a generic "Upload failed".
+    status = check_collection_status(collection_name, expected_dim=dimension, expect_sparse=use_sparse)
+    if status["status"] == "unreachable":
+        return {"status": "error", "filename": filename, "error": f"Qdrant unreachable: {status['detail']}"}
+    if status["status"] in ("dim_mismatch", "schema_mismatch"):
+        return {"status": "error", "filename": filename, "error": status["detail"]}
+
+    if use_sparse:
         ensure_hybrid_collection(collection_name)
     else:
         ensure_collection(qdrant_host, collection_name, dimension)
@@ -2957,7 +3058,12 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
     
     if not success:
         return {"status": "error", "filename": filename, "error": "Upload failed"}
-    
+
+    # Remove any stale chunks left over from a previous, longer version of this
+    # file. Re-ingesting a shortened document overwrites indices 0..N-1 by id
+    # but would otherwise orphan the old tail (index >= N).
+    delete_orphan_chunks(collection_name, file_path, len(chunks))
+
     # Mark as processed
     mark_file_processed(file_path, {
         "chunks": len(chunks),
@@ -3413,10 +3519,35 @@ def ingest_to_qdrant(chunks, url, title, config):
             }
         ))
     
-    # Upsert to collection
+    # Upsert to collection (auto-create it if it doesn't exist yet).
+    # Derive the dimension from the embeddings we just produced so the
+    # collection always matches this model's vectors, regardless of config.
     collection = config["collection_name"]
+    dense_name = os.environ.get("DENSE_VECTOR_NAME", "dense")
+    try:
+        from qdrant_hybrid_helper import ensure_hybrid_collection
+        if embeddings:
+            dim = len(embeddings[0])
+            os.environ["EMBEDDING_DIMENSION"] = str(dim)
+            # If the collection already exists with an incompatible dense
+            # dimension, it can never accept our vectors -- drop it so it is
+            # recreated below at the correct size.
+            try:
+                existing = client.get_collection(collection)
+                vectors = existing.config.params.vectors
+                existing_dim = vectors[dense_name].size if isinstance(vectors, dict) else vectors.size
+                if existing_dim != dim:
+                    print(f"  [WARN] Collection '{collection}' has dim {existing_dim}, "
+                          f"expected {dim}; recreating", file=sys.stderr)
+                    client.delete_collection(collection)
+            except Exception:
+                # Collection doesn't exist yet (or has no dense vector) -- ensure creates it.
+                pass
+        ensure_hybrid_collection(collection)
+    except Exception as e:
+        print(f"  [WARN] Could not ensure collection '{collection}': {e}", file=sys.stderr)
     client.upsert(collection_name=collection, points=points)
-    
+
     return len(points)
 
 def crawl(start_url, config):
@@ -3558,7 +3689,8 @@ export TMPDIR="${TMPDIR:-/tmp}"
 # Export config
 export QDRANT_HOST QDRANT_GRPC_PORT COLLECTION_NAME DOCUMENTS_DIR
 export SPARSE_EMBED_ENABLED SPARSE_EMBED_MODEL HYBRID_SEARCH_MODE
-export CHUNK_SIZE CHUNK_OVERLAP FASTEMBED_MODEL FASTEMBED_CACHE_DIR
+export CHUNK_SIZE CHUNK_OVERLAP FASTEMBED_MODEL FASTEMBED_CACHE_DIR EMBEDDING_DIMENSION
+export DENSE_VECTOR_NAME SPARSE_VECTOR_NAME
 export CSV_NL_TRANSFORM_ENABLED CSV_NL_DUAL_MODE CSV_NL_LANG
 export WEB_CRAWLER_MAX_PAGES WEB_CRAWLER_MAX_DEPTH WEB_CRAWLER_DELAY
 export DEBUG DOC_DEDUP_ENABLED
