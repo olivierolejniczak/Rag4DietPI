@@ -3365,35 +3365,12 @@ load_dotenv("config.env")
 
 
 def get_llm_response(prompt: str, timeout: int = None) -> str:
-    """Get LLM response using Ollama."""
-    import requests
-    
-    ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-    model = os.environ.get("LLM_MODEL", "qwen2.5:3b")
+    """Get LLM response via the shared llm_helper (Ollama)."""
+    from llm_helper import llm_generate
+
     timeout = timeout or int(os.environ.get("MAPREDUCE_CHUNK_TIMEOUT", "120"))
-    
-    try:
-        response = requests.post(
-            f"{ollama_host}/api/generate",
-            json={
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.3,
-                    "num_predict": 500
-                }
-            },
-            timeout=timeout
-        )
-        
-        if response.status_code == 200:
-            return response.json().get("response", "").strip()
-        else:
-            return f"[Error: {response.status_code}]"
-    
-    except Exception as e:
-        return f"[Error: {str(e)}]"
+    result = llm_generate(prompt, max_tokens=500, timeout=timeout, temperature=0.3)
+    return result if result is not None else "[Error: LLM request failed]"
 
 
 def map_phase(chunks: List[str], progress_callback=None) -> List[str]:
@@ -3599,33 +3576,11 @@ load_dotenv("config.env")
 
 
 def get_llm_response(prompt: str, timeout: int = 120) -> str:
-    """Get LLM response."""
-    import requests
-    
-    ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-    model = os.environ.get("LLM_MODEL", "qwen2.5:3b")
-    
-    try:
-        response = requests.post(
-            f"{ollama_host}/api/generate",
-            json={
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.1,
-                    "num_predict": 1000
-                }
-            },
-            timeout=timeout
-        )
-        
-        if response.status_code == 200:
-            return response.json().get("response", "").strip()
-        return ""
-    
-    except Exception:
-        return ""
+    """Get LLM response via the shared llm_helper (Ollama)."""
+    from llm_helper import llm_generate
+
+    result = llm_generate(prompt, max_tokens=1000, timeout=timeout, temperature=0.1)
+    return result or ""
 
 
 def extract_json_from_response(response: str) -> List[Dict]:
@@ -3859,33 +3814,11 @@ load_dotenv("config.env")
 
 
 def get_llm_response(prompt: str, timeout: int = 180) -> str:
-    """Get LLM response."""
-    import requests
-    
-    ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-    model = os.environ.get("LLM_MODEL", "qwen2.5:3b")
-    
-    try:
-        response = requests.post(
-            f"{ollama_host}/api/generate",
-            json={
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.2,
-                    "num_predict": 1000
-                }
-            },
-            timeout=timeout
-        )
-        
-        if response.status_code == 200:
-            return response.json().get("response", "").strip()
-        return ""
-    
-    except Exception:
-        return ""
+    """Get LLM response via the shared llm_helper (Ollama)."""
+    from llm_helper import llm_generate
+
+    result = llm_generate(prompt, max_tokens=1000, timeout=timeout, temperature=0.2)
+    return result or ""
 
 
 def is_high_stakes_query(query: str) -> bool:
