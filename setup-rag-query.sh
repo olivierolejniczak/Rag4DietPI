@@ -4304,6 +4304,7 @@ def get_config():
         "query_classification_enabled": os.environ.get("QUERY_CLASSIFICATION_ENABLED", "false").lower() == "true",
         "rerank_enabled": os.environ.get("RERANK_ENABLED", "false").lower() == "true",
         "crag_enabled": os.environ.get("CRAG_ENABLED", "false").lower() == "true",
+        "web_search_enabled": os.environ.get("WEB_SEARCH_ENABLED", "true").lower() == "true",
         "rse_enabled": os.environ.get("RSE_ENABLED", "false").lower() == "true",
         "context_window_enabled": os.environ.get("CONTEXT_WINDOW_ENABLED", "false").lower() == "true",
         "diversity_filter_enabled": os.environ.get("DIVERSITY_FILTER_ENABLED", "false").lower() == "true",
@@ -4586,9 +4587,12 @@ def main(query):
     
     # CRAG: trigger web search if confidence is below threshold
     web_results = []
-    if config["crag_enabled"]:
+    if config["crag_enabled"] and not config["web_search_enabled"]:
+        if verbose:
+            print("[CRAG] Enabled but WEB_SEARCH_ENABLED=false; skipping web fallback")
+    if config["crag_enabled"] and config["web_search_enabled"]:
         crag_threshold = config.get("crag_threshold", 0.4)
-        
+
         if retrieval_confidence < crag_threshold:
             if verbose:
                 print(f"[CRAG] Low confidence ({retrieval_confidence:.2f} < {crag_threshold}), triggering web search...")
@@ -4610,22 +4614,32 @@ def main(query):
     
     # Add web results as synthetic chunks for answer generation
     if web_results:
+        # Score web chunks on the same scale as the retrieved RAG chunks. A
+        # fixed value (e.g. 0.5) collides with the score-type detection in
+        # compute_retrieval_confidence and flips its normalization regime,
+        # making the recomputed confidence meaningless. Treat web chunks as
+        # being as relevant as the best local chunk (fetched for this query).
+        rag_scores = [
+            float(c.get("rerank_score") or c.get("rrf_score") or 0)
+            for c in chunks if isinstance(c, dict)
+        ]
+        web_score = max(rag_scores) if rag_scores else 0.5
         for i, wr in enumerate(web_results):
             web_chunk = {
                 "id": f"web_{i}",
                 "text": f"{wr.get('title', '')}\n{wr.get('content', '')}",
                 "filename": "web_search",
                 "source": wr.get("url", ""),
-                "rrf_score": 0.5,  # Give web results moderate score
+                "rrf_score": web_score,
                 "chunk_type": "web",
             }
             chunks.append(web_chunk)
         if verbose:
             print(f"[CRAG] Added {len(web_results)} web chunks to context")
-        
-        # Recalculate confidence with web results
+
+        # Recalculate confidence (now on a consistent score scale), then apply a
+        # small boost to reflect the added external grounding.
         retrieval_confidence = compute_retrieval_confidence(chunks)
-        # Boost confidence when web results are available
         retrieval_confidence = min(1.0, retrieval_confidence + 0.15)
         if verbose:
             print(f"[QUALITY] Confidence after web boost: {retrieval_confidence:.2f}")
