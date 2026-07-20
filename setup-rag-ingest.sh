@@ -1738,6 +1738,13 @@ import re
 from datetime import datetime
 
 
+def _int_env(key, default):
+    """int() an env var, tolerating a missing/blank/invalid value."""
+    try:
+        return int(os.environ.get(key, ""))
+    except (TypeError, ValueError):
+        return int(default)
+
 def _get_config():
     """Get CSV NL transform configuration"""
     return {
@@ -1745,7 +1752,7 @@ def _get_config():
         "dual_mode": os.environ.get("CSV_NL_DUAL_MODE", "true").lower() == "true",
         "mode": os.environ.get("CSV_NL_MODE", "auto"),  # auto|llm|custom
         "lang": os.environ.get("CSV_NL_LANG", "fr"),    # fr|en|auto
-        "max_desc_len": int(os.environ.get("CSV_NL_MAX_DESC_LEN", "300")),
+        "max_desc_len": _int_env("CSV_NL_MAX_DESC_LEN", 300),
         "template": os.environ.get("CSV_NL_TEMPLATE", ""),
         "debug": os.environ.get("DEBUG", "").lower() == "true",
     }
@@ -2893,6 +2900,13 @@ from doc_dedup import (
     get_doc_index_stats,
 )
 
+def _int_env(key, default):
+    """int() an env var, tolerating a missing/blank/invalid value."""
+    try:
+        return int(os.environ.get(key, ""))
+    except (TypeError, ValueError):
+        return int(default)
+
 def get_file_hash(file_path):
     """Calculate MD5 hash of file"""
     hasher = hashlib.md5()
@@ -2975,8 +2989,8 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
         text,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
-        min_chunk_size=int(os.environ.get("MIN_CHUNK_SIZE", "100")),
-        max_chunk_size=int(os.environ.get("MAX_CHUNK_SIZE", "1200")),
+        min_chunk_size=_int_env("MIN_CHUNK_SIZE", 100),
+        max_chunk_size=_int_env("MAX_CHUNK_SIZE", 1200),
     )
     
     if not chunks:
@@ -3039,7 +3053,7 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
                 }
             })
         
-        batch_size = int(os.environ.get("QDRANT_BATCH_SIZE", "100"))
+        batch_size = _int_env("QDRANT_BATCH_SIZE", 100)
         success = upload_hybrid_points(collection_name, points, batch_size)
     else:
         # Legacy dense-only points
@@ -3061,7 +3075,7 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
                 }
             })
         
-        batch_size = int(os.environ.get("QDRANT_BATCH_SIZE", "100"))
+        batch_size = _int_env("QDRANT_BATCH_SIZE", 100)
         success = upload_points(qdrant_host, collection_name, points, batch_size)
     
     if not success:
@@ -3183,8 +3197,8 @@ def main():
     # Load config
     qdrant_host = os.environ.get("QDRANT_HOST", "http://localhost:6333")
     collection_name = os.environ.get("COLLECTION_NAME", "documents")
-    chunk_size = int(os.environ.get("CHUNK_SIZE", "500"))
-    chunk_overlap = int(os.environ.get("CHUNK_OVERLAP", "80"))
+    chunk_size = _int_env("CHUNK_SIZE", 500)
+    chunk_overlap = _int_env("CHUNK_OVERLAP", 80)
     docs_dir = os.environ.get("DOCUMENTS_DIR", "./documents")
     debug = args.debug or os.environ.get("DEBUG", "false").lower() == "true"
     
@@ -3265,24 +3279,38 @@ import hashlib
 from urllib.parse import urljoin, urlparse, urlunparse
 from collections import deque
 
+def _int_env(key, default):
+    """int() an env var, tolerating a missing/blank/invalid value."""
+    try:
+        return int(os.environ.get(key, ""))
+    except (TypeError, ValueError):
+        return int(default)
+
+def _float_env(key, default):
+    """float() an env var, tolerating a missing/blank/invalid value."""
+    try:
+        return float(os.environ.get(key, ""))
+    except (TypeError, ValueError):
+        return float(default)
+
 def get_config():
     """Get crawler configuration from environment"""
     return {
-        "max_pages": int(os.environ.get("WEB_CRAWLER_MAX_PAGES", "50")),
-        "max_depth": int(os.environ.get("WEB_CRAWLER_MAX_DEPTH", "3")),
+        "max_pages": _int_env("WEB_CRAWLER_MAX_PAGES", 50),
+        "max_depth": _int_env("WEB_CRAWLER_MAX_DEPTH", 3),
         "same_domain": os.environ.get("WEB_CRAWLER_SAME_DOMAIN", "true").lower() == "true",
-        "delay": float(os.environ.get("WEB_CRAWLER_DELAY", "1.0")),
-        "timeout": int(os.environ.get("WEB_CRAWLER_TIMEOUT", "30")),
+        "delay": _float_env("WEB_CRAWLER_DELAY", 1.0),
+        "timeout": _int_env("WEB_CRAWLER_TIMEOUT", 30),
         "respect_robots": os.environ.get("WEB_CRAWLER_RESPECT_ROBOTS", "true").lower() == "true",
         "user_agent": os.environ.get("WEB_CRAWLER_USER_AGENT", "RAGBot/1.0 (+https://github.com/rag-system)"),
         "skip_extensions": os.environ.get("WEB_CRAWLER_SKIP_EXT", ".pdf,.doc,.docx,.xls,.xlsx,.zip,.tar,.gz,.exe,.dmg,.pkg,.jpg,.jpeg,.png,.gif,.mp4,.mp3").split(","),
         "exclude_patterns": os.environ.get("WEB_CRAWLER_EXCLUDE_PATTERNS", "/login,/logout,/admin,/cart,/checkout,/account").split(","),
-        "chunk_size": int(os.environ.get("CHUNK_SIZE", "500")),
-        "chunk_overlap": int(os.environ.get("CHUNK_OVERLAP", "50")),
+        "chunk_size": _int_env("CHUNK_SIZE", 500),
+        "chunk_overlap": _int_env("CHUNK_OVERLAP", 50),
         "debug": os.environ.get("DEBUG", "").lower() == "true",
         # Qdrant settings
         "qdrant_host": os.environ.get("QDRANT_HOST", "http://localhost:6333"),
-        "qdrant_grpc_port": int(os.environ.get("QDRANT_GRPC_PORT", "6334")),
+        "qdrant_grpc_port": _int_env("QDRANT_GRPC_PORT", 6334),
         "collection_name": os.environ.get("COLLECTION_NAME", "documents"),
     }
 
@@ -3577,7 +3605,7 @@ def ingest_to_qdrant(chunks, url, title, config):
             },
         })
 
-    batch_size = int(os.environ.get("QDRANT_BATCH_SIZE", "48"))
+    batch_size = _int_env("QDRANT_BATCH_SIZE", 48)
     if not upload_hybrid_points(collection, points, batch_size=batch_size):
         print(f"  [WARN] Hybrid upload failed for {url}", file=sys.stderr)
         return 0
@@ -3804,6 +3832,7 @@ echo "Creating utility scripts..."
 
 cat > "$PROJECT_DIR/clear-collection.sh" << 'EOFSH'
 #!/bin/bash
+cd "$(dirname "$0")"
 source ./config.env 2>/dev/null || true
 
 QDRANT_HOST="${QDRANT_HOST:-http://localhost:6333}"
@@ -3814,7 +3843,7 @@ read -p "Are you sure? (y/N) " -n 1 -r
 echo
 
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    curl -X DELETE "${QDRANT_HOST}/collections/${COLLECTION}"
+    curl -s --max-time 10 -X DELETE "${QDRANT_HOST}/collections/${COLLECTION}"
     rm -rf .ingest_tracking/*
     echo "[OK] Collection cleared"
 else
@@ -3852,14 +3881,21 @@ import hashlib
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
+def _int_env(key, default):
+    """int() an env var, tolerating a missing/blank/invalid value."""
+    try:
+        return int(os.environ.get(key, ""))
+    except (TypeError, ValueError):
+        return int(default)
+
 def _get_config():
     """Get csv configuration"""
     return {
         "csv_nl_enabled": os.environ.get("CSV_NL_TRANSFORM_ENABLED", "true").lower() == "true",
         "csv_dual_mode": os.environ.get("CSV_NL_DUAL_MODE", "true").lower() == "true",
         "merge_chunks": os.environ.get("CSV_MERGE_CHUNKS", "true").lower() == "true",
-        "merge_target": int(os.environ.get("CSV_MERGE_TARGET", "400")),
-        "merge_max": int(os.environ.get("CSV_MERGE_MAX", "800")),
+        "merge_target": _int_env("CSV_MERGE_TARGET", 400),
+        "merge_max": _int_env("CSV_MERGE_MAX", 800),
         "debug": os.environ.get("DEBUG", "").lower() == "true",
     }
 
@@ -3976,7 +4012,7 @@ def ingest_file_csv(filepath, qdrant_host, collection_name, **kwargs):
             points.append(point)
         
         # Upload with hybrid format
-        batch_size = int(os.environ.get("QDRANT_BATCH_SIZE", "100"))
+        batch_size = _int_env("QDRANT_BATCH_SIZE", 100)
         success = upload_hybrid_points(collection_name, points, batch_size)
         
         if not success:

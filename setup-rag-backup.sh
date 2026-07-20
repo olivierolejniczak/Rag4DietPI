@@ -440,7 +440,12 @@ if ! $CONFIG_ONLY; then
                 sleep 2
             fi
             
-            # Restore data
+            # Restore data (guard against an empty or root path before rm -rf)
+            if [ -z "$QDRANT_DATA_DIR" ] || [ "$QDRANT_DATA_DIR" = "/" ]; then
+                log_err "Refusing to wipe unsafe QDRANT_DATA_DIR='$QDRANT_DATA_DIR'"
+                [ -n "$TEMP_DIR" ] && rm -rf "$TEMP_DIR"
+                exit 1
+            fi
             mkdir -p "$QDRANT_DATA_DIR"
             rm -rf "$QDRANT_DATA_DIR"/*
             cp -r "$BACKUP_PATH/qdrant"/* "$QDRANT_DATA_DIR/"
