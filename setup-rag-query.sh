@@ -63,7 +63,7 @@ def get_config():
         "ollama_host": os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
         "llm_model": os.environ.get("LLM_MODEL", "qwen2.5:1.5b"),
         "embedding_model": os.environ.get("EMBEDDING_MODEL", "nomic-embed-text"),
-        "timeout_default": int(os.environ.get("LLM_TIMEOUT_DEFAULT", "180")),
+        "timeout_default": int(os.environ.get("LLM_TIMEOUT_OVERRIDE", os.environ.get("LLM_TIMEOUT_DEFAULT", "180"))),
         "timeout_ultrafast": int(os.environ.get("LLM_TIMEOUT_ULTRAFAST", "90")),
         "timeout_full": int(os.environ.get("LLM_TIMEOUT_FULL", "0")),
         "temperature": float(os.environ.get("TEMPERATURE", "0.2")),
@@ -4331,8 +4331,8 @@ def get_config():
         "diversity_threshold": float(os.environ.get("DIVERSITY_THRESHOLD", "0.85")),
         "crag_threshold": float(os.environ.get("CRAG_THRESHOLD", os.environ.get("CRAG_MIN_RELEVANCE", "0.4"))),
         "grounding_threshold": float(os.environ.get("GROUNDING_THRESHOLD", "0.5")),
-        "max_context_chars": int(os.environ.get("MAX_CONTEXT_CHARS", "5000")),
-        "num_predict": int(os.environ.get("NUM_PREDICT", "500")),
+        "max_context_chars": int(os.environ.get("MAX_CONTEXT_CHARS_OVERRIDE", os.environ.get("MAX_CONTEXT_CHARS", "5000"))),
+        "num_predict": int(os.environ.get("NUM_PREDICT_OVERRIDE", os.environ.get("NUM_PREDICT", "500"))),
         "confidence_threshold": float(os.environ.get("RETRIEVAL_CONFIDENCE_MIN", "0.3")),
         "coverage_threshold": float(os.environ.get("ANSWER_COVERAGE_MIN", "0.2")),
         "abstention_message": os.environ.get("ABSTENTION_MESSAGE", 
@@ -4382,9 +4382,24 @@ def main(query):
     # Check cache
     cache = QueryCache() if config["cache_enabled"] else None
     no_cache = os.environ.get("NO_CACHE", "false").lower() == "true"
-    
+
+    # Scope the cache key to the settings that change the answer, so a fast/ultra
+    # answer is never served for a full/deep query (and vice versa).
+    import hashlib
+    _cache_sig = "|".join([
+        os.environ.get("LLM_MODEL", ""),
+        str(config["num_predict"]),
+        str(config["max_context_chars"]),
+        str(config["hyde_enabled"]),
+        str(config["crag_enabled"]),
+        str(config["rerank_enabled"]),
+        str(config["multipass_enabled"]),
+        os.environ.get("QUERY_MODE_ACTIVE", ""),
+    ])
+    config_hash = hashlib.md5(_cache_sig.encode()).hexdigest()[:12]
+
     if cache and not no_cache:
-        cached = cache.get(query)
+        cached = cache.get(query, config_hash)
         if cached:
             if verbose:
                 print("[CACHE] Hit")
@@ -4717,7 +4732,7 @@ def main(query):
     
     # Cache result
     if cache and not no_cache:
-        cache.set(query, answer)
+        cache.set(query, answer, config_hash)
     
     # Output
     elapsed = time.time() - start_time
