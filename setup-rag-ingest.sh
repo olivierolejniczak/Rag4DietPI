@@ -271,6 +271,10 @@ def smart_chunk(text, chunk_size=500, chunk_overlap=80, min_chunk_size=100, max_
     if not text or not text.strip():
         return []
     
+    # Guard against pathological config that could stall the force-split loops
+    # below (each iteration subtracts chunk_overlap from the split point).
+    chunk_overlap = max(0, min(chunk_overlap, chunk_size - 1))
+
     # Clean text
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = re.sub(r' {2,}', ' ', text)
@@ -321,7 +325,8 @@ def smart_chunk(text, chunk_size=500, chunk_overlap=80, min_chunk_size=100, max_
             while len(current_chunk) > max_chunk_size:
                 split_point = _find_split_point(current_chunk, chunk_size)
                 chunks.append(_make_chunk(current_chunk[:split_point], "forced"))
-                current_chunk = current_chunk[split_point - chunk_overlap:]
+                # Always advance by at least one char so the loop can't stall.
+                current_chunk = current_chunk[max(split_point - chunk_overlap, 1):]
         
         # Add remaining content
         if current_chunk and len(current_chunk) >= min_chunk_size:
@@ -391,7 +396,7 @@ def _chunk_code(text, target_size, max_size):
         
         while len(current) > max_size:
             split_point = current.rfind('\n', 0, target_size)
-            if split_point == -1:
+            if split_point <= 0:
                 split_point = target_size
             chunks.append(_make_chunk(current[:split_point], "code"))
             current = current[split_point:]
@@ -4323,8 +4328,11 @@ if __name__ == "__main__":
         print(f"Characters: {meta['char_count']}")
         print(f"Chunks: {meta['chunk_count']}")
         print(f"---")
-        print(f"First chunk preview ({len(chunks[0])} chars):")
-        print(chunks[0][:500] + "..." if len(chunks[0]) > 500 else chunks[0])
+        if chunks:
+            print(f"First chunk preview ({len(chunks[0])} chars):")
+            print(chunks[0][:500] + "..." if len(chunks[0]) > 500 else chunks[0])
+        else:
+            print("(no chunks produced)")
     else:
         print("Usage: python document_loader.py <file_path>")
 EOFPY

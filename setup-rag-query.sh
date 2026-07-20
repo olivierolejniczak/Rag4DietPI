@@ -58,15 +58,29 @@ def reset_debug_info():
         "embedding_total_time": 0,
     }
 
+def _int_env(key, default):
+    """int() an env var, tolerating a missing/blank/invalid value."""
+    try:
+        return int(os.environ.get(key, ""))
+    except (TypeError, ValueError):
+        return int(default)
+
+def _float_env(key, default):
+    """float() an env var, tolerating a missing/blank/invalid value."""
+    try:
+        return float(os.environ.get(key, ""))
+    except (TypeError, ValueError):
+        return float(default)
+
 def get_config():
     return {
         "ollama_host": os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
         "llm_model": os.environ.get("LLM_MODEL", "qwen2.5:3b"),
         "embedding_model": os.environ.get("EMBEDDING_MODEL", "nomic-embed-text"),
-        "timeout_default": int(os.environ.get("LLM_TIMEOUT_OVERRIDE", os.environ.get("LLM_TIMEOUT_DEFAULT", "180"))),
-        "timeout_ultrafast": int(os.environ.get("LLM_TIMEOUT_ULTRAFAST", "90")),
-        "timeout_full": int(os.environ.get("LLM_TIMEOUT_FULL", "0")),
-        "temperature": float(os.environ.get("TEMPERATURE", "0.2")),
+        "timeout_default": _int_env("LLM_TIMEOUT_OVERRIDE", _int_env("LLM_TIMEOUT_DEFAULT", 180)),
+        "timeout_ultrafast": _int_env("LLM_TIMEOUT_ULTRAFAST", 90),
+        "timeout_full": _int_env("LLM_TIMEOUT_FULL", 0),
+        "temperature": _float_env("TEMPERATURE", 0.2),
     }
 
 def llm_generate(prompt, max_tokens=500, timeout=None, temperature=None):
@@ -4231,6 +4245,20 @@ from quality_ledger import QualityLedger, compute_retrieval_confidence, compute_
 from memory import ConversationMemory
 from query_cache import QueryCache
 
+def _int_env(key, default):
+    """int() an env var, tolerating a missing/blank/invalid value."""
+    try:
+        return int(os.environ.get(key, ""))
+    except (TypeError, ValueError):
+        return int(default)
+
+def _float_env(key, default):
+    """float() an env var, tolerating a missing/blank/invalid value."""
+    try:
+        return float(os.environ.get(key, ""))
+    except (TypeError, ValueError):
+        return float(default)
+
 def get_config():
     """Get query configuration from environment."""
     return {
@@ -4258,16 +4286,16 @@ def get_config():
         "multipass_enabled": os.environ.get("MULTIPASS_ENABLED", "false").lower() == "true",
         
         # Parameters
-        "top_k": int(os.environ.get("TOP_K", os.environ.get("DEFAULT_TOP_K", "5"))),
-        "rerank_top_k": int(os.environ.get("RERANK_TOP_K", "10")),
-        "context_window_size": int(os.environ.get("CONTEXT_WINDOW_SIZE", "1")),
-        "diversity_threshold": float(os.environ.get("DIVERSITY_THRESHOLD", "0.85")),
-        "crag_threshold": float(os.environ.get("CRAG_THRESHOLD", os.environ.get("CRAG_MIN_RELEVANCE", "0.4"))),
-        "grounding_threshold": float(os.environ.get("GROUNDING_THRESHOLD", "0.5")),
-        "max_context_chars": int(os.environ.get("MAX_CONTEXT_CHARS_OVERRIDE", os.environ.get("MAX_CONTEXT_CHARS", "5000"))),
-        "num_predict": int(os.environ.get("NUM_PREDICT_OVERRIDE", os.environ.get("NUM_PREDICT", "500"))),
-        "confidence_threshold": float(os.environ.get("RETRIEVAL_CONFIDENCE_MIN", "0.3")),
-        "coverage_threshold": float(os.environ.get("ANSWER_COVERAGE_MIN", "0.2")),
+        "top_k": _int_env("TOP_K", _int_env("DEFAULT_TOP_K", 5)),
+        "rerank_top_k": _int_env("RERANK_TOP_K", 10),
+        "context_window_size": _int_env("CONTEXT_WINDOW_SIZE", 1),
+        "diversity_threshold": _float_env("DIVERSITY_THRESHOLD", 0.85),
+        "crag_threshold": _float_env("CRAG_THRESHOLD", _float_env("CRAG_MIN_RELEVANCE", 0.4)),
+        "grounding_threshold": _float_env("GROUNDING_THRESHOLD", 0.5),
+        "max_context_chars": _int_env("MAX_CONTEXT_CHARS_OVERRIDE", _int_env("MAX_CONTEXT_CHARS", 5000)),
+        "num_predict": _int_env("NUM_PREDICT_OVERRIDE", _int_env("NUM_PREDICT", 500)),
+        "confidence_threshold": _float_env("RETRIEVAL_CONFIDENCE_MIN", 0.3),
+        "coverage_threshold": _float_env("ANSWER_COVERAGE_MIN", 0.2),
         "abstention_message": os.environ.get("ABSTENTION_MESSAGE", 
             "Je n'ai pas assez d'informations fiables pour repondre avec confiance."),
         
@@ -4276,7 +4304,7 @@ def get_config():
         "hybrid_mode": os.environ.get("HYBRID_SEARCH_MODE", "native"),
         
         # multipass: Multi-pass parameters
-        "multipass_variants": int(os.environ.get("MULTIPASS_VARIANTS", "3")),
+        "multipass_variants": _int_env("MULTIPASS_VARIANTS", 3),
     }
 
 def main(query):
