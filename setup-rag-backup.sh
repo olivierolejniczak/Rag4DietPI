@@ -165,6 +165,8 @@ if $FULL_BACKUP || $DATA_ONLY; then
             QDRANT_RUNNING=true
             log_info "Stopping Qdrant for consistent backup..."
             docker stop qdrant
+            # Ensure Qdrant is restarted even if the backup fails midway.
+            trap 'docker start qdrant >/dev/null 2>&1 || true' EXIT
             sleep 2
         fi
         
@@ -177,6 +179,7 @@ if $FULL_BACKUP || $DATA_ONLY; then
         if $QDRANT_RUNNING; then
             log_info "Restarting Qdrant..."
             docker start qdrant
+            trap - EXIT
             sleep 3
         fi
     fi
@@ -368,6 +371,8 @@ if ! $DATA_ONLY; then
             echo "  Would restore: scripts/*.sh, *.env, *.md"
         else
             cp -v "$BACKUP_PATH/scripts"/*.sh "$PROJECT_DIR/" 2>/dev/null || true
+            # Preserve the current config.env before it is overwritten by the backup's.
+            [ -f "$PROJECT_DIR/config.env" ] && cp "$PROJECT_DIR/config.env" "$PROJECT_DIR/config.env.pre-restore" 2>/dev/null || true
             cp -v "$BACKUP_PATH/scripts"/*.env "$PROJECT_DIR/" 2>/dev/null || true
             cp -v "$BACKUP_PATH/scripts"/*.md "$PROJECT_DIR/" 2>/dev/null || true
             chmod +x "$PROJECT_DIR"/*.sh 2>/dev/null || true

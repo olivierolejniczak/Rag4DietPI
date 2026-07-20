@@ -221,6 +221,9 @@ echo ""
 echo "=== Phase 3: Qdrant Vector Database ==="
 
 mkdir -p "$QDRANT_DATA_DIR"
+# World-writable: the container runs without --user, so its (possibly non-host)
+# UID must be able to write this bind mount. Accepted trade-off on a single-user
+# appliance; on a shared host, chown to the container UID and tighten instead.
 chmod 777 "$QDRANT_DATA_DIR"
 
 if docker ps -a --format '{{.Names}}' | grep -q "^${QDRANT_CONTAINER_NAME}$"; then
@@ -291,7 +294,17 @@ if command -v ollama &> /dev/null; then
     log_ok "Ollama installed: $(ollama --version 2>/dev/null || echo 'version unknown')"
 else
     log_info "Ollama not found. Installing..."
-    curl -fsSL https://ollama.com/install.sh | sh
+    # Download the installer fully before running it, so a truncated or failed
+    # download is never piped straight into sh mid-stream.
+    OLLAMA_INSTALLER="$(mktemp)"
+    if curl -fsSL https://ollama.com/install.sh -o "$OLLAMA_INSTALLER" && [ -s "$OLLAMA_INSTALLER" ]; then
+        sh "$OLLAMA_INSTALLER"
+        rm -f "$OLLAMA_INSTALLER"
+    else
+        rm -f "$OLLAMA_INSTALLER"
+        log_err "Failed to download Ollama installer"
+        exit 1
+    fi
     
     if command -v ollama &> /dev/null; then
         log_ok "Ollama installed successfully"
@@ -358,6 +371,9 @@ echo ""
 echo "=== Phase 5: SearXNG Web Search ==="
 
 mkdir -p "$SEARXNG_DATA_DIR"
+# World-writable: the container runs without --user, so its (possibly non-host)
+# UID must be able to write this bind mount. Accepted trade-off on a single-user
+# appliance; on a shared host, chown to the container UID and tighten instead.
 chmod 777 "$SEARXNG_DATA_DIR"
 
 # Create SearXNG settings.yml
