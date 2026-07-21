@@ -106,8 +106,13 @@ def get_config():
         "temperature": _float_env("TEMPERATURE", 0.2),
     }
 
-def llm_generate(prompt, max_tokens=500, timeout=None, temperature=None):
-    """Genere du texte via l'API OpenAI-compatible (/v1/chat/completions)."""
+def llm_generate(prompt, max_tokens=500, timeout=None, temperature=None, response_format=None):
+    """Genere du texte via l'API OpenAI-compatible (/v1/chat/completions).
+
+    response_format (optionnel) : dict OpenAI-compatible (ex. json_schema) passe
+    tel quel a llama-server pour contraindre la sortie. Ignore par les backends
+    qui ne le supportent pas.
+    """
     global _debug_info
     config = get_config()
 
@@ -134,6 +139,11 @@ def llm_generate(prompt, max_tokens=500, timeout=None, temperature=None):
         "temperature": temperature,
         "stream": False,
     }
+    # Sortie structuree native (llama-server) : force un JSON conforme au schema,
+    # sans dependance externe. Simplement ignore par un backend qui ne gere pas
+    # response_format.
+    if response_format is not None:
+        payload["response_format"] = response_format
 
     start = time.time()
     for attempt in range(config["retries"] + 1):
@@ -3322,11 +3332,12 @@ from dotenv import load_dotenv
 load_dotenv("config.env")
 
 
-def get_llm_response(prompt: str, timeout: int = 120) -> str:
-    """Get LLM response via the shared llm_helper (Ollama)."""
+def get_llm_response(prompt: str, timeout: int = 120, response_format=None) -> str:
+    """Get LLM response via the shared llm_helper (llama-swap)."""
     from llm_helper import llm_generate
 
-    result = llm_generate(prompt, max_tokens=1000, timeout=timeout, temperature=0.1)
+    result = llm_generate(prompt, max_tokens=1000, timeout=timeout,
+                          temperature=0.1, response_format=response_format)
     return result or ""
 
 
@@ -3419,7 +3430,12 @@ Only return the JSON, no explanation.
 
 JSON:"""
     
-    response = get_llm_response(prompt)
+    # Sortie structuree : impose un tableau JSON d'objets (champs libres, definis
+    # par la requete d'extraction). Garantit un JSON parsable ;
+    # extract_json_from_response reste en filet de securite.
+    schema = {"type": "json_schema", "json_schema": {"name": "extractions", "schema": {
+        "type": "array", "items": {"type": "object", "additionalProperties": True}}}}
+    response = get_llm_response(prompt, response_format=schema)
     return extract_json_from_response(response)
 
 
@@ -3560,11 +3576,12 @@ from dotenv import load_dotenv
 load_dotenv("config.env")
 
 
-def get_llm_response(prompt: str, timeout: int = 180) -> str:
-    """Get LLM response via the shared llm_helper (Ollama)."""
+def get_llm_response(prompt: str, timeout: int = 180, response_format=None) -> str:
+    """Get LLM response via the shared llm_helper (llama-swap)."""
     from llm_helper import llm_generate
 
-    result = llm_generate(prompt, max_tokens=1000, timeout=timeout, temperature=0.2)
+    result = llm_generate(prompt, max_tokens=1000, timeout=timeout,
+                          temperature=0.2, response_format=response_format)
     return result or ""
 
 
@@ -3623,8 +3640,17 @@ Or if problems found:
 
 JSON:"""
     
-    response = get_llm_response(prompt)
-    
+    # Sortie structuree : schema de verdict impose au modele -> JSON toujours
+    # valide (grounded/confidence/issues). Le parsing regex reste en filet.
+    schema = {"type": "json_schema", "json_schema": {"name": "verification", "schema": {
+        "type": "object",
+        "properties": {"grounded": {"type": "boolean"},
+                       "confidence": {"type": "number"},
+                       "issues": {"type": "array", "items": {"type": "string"}}},
+        "required": ["grounded", "confidence", "issues"],
+        "additionalProperties": False}}}
+    response = get_llm_response(prompt, response_format=schema)
+
     # Parse JSON from response
     try:
         # Find JSON in response
