@@ -40,6 +40,10 @@ import requests
 import time
 from typing import Any, Dict, Optional
 
+# response_format : objet OpenAI-compatible (json_schema/json_object) serialise
+# tel quel dans le payload JSON -> toujours un dict.
+ResponseFormat = Dict[str, Any]
+
 # Suivi de debug des appels LLM et embeddings
 _debug_info = {
     "llm_model": None,
@@ -108,7 +112,7 @@ def get_config():
     }
 
 def llm_generate(prompt, max_tokens=500, timeout=None, temperature=None,
-                 response_format: Optional[Dict[str, Any]] = None):
+                 response_format: Optional[ResponseFormat] = None):
     """Genere du texte via l'API OpenAI-compatible (/v1/chat/completions).
 
     response_format (optionnel) : objet OpenAI-compatible (ex. json_schema),
@@ -3330,13 +3334,15 @@ import re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from typing import List, Dict, Any, Optional
+
+ResponseFormat = Dict[str, Any]  # OpenAI-compatible response_format (JSON object)
 from dotenv import load_dotenv
 
 load_dotenv("config.env")
 
 
 def get_llm_response(prompt: str, timeout: int = 120,
-                     response_format: Optional[Dict[str, Any]] = None) -> str:
+                     response_format: Optional[ResponseFormat] = None) -> str:
     """Get LLM response via the shared llm_helper (llama-swap)."""
     from llm_helper import llm_generate
 
@@ -3575,13 +3581,15 @@ import re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from typing import Any, Dict, List, Optional, Tuple
+
+ResponseFormat = Dict[str, Any]  # OpenAI-compatible response_format (JSON object)
 from dotenv import load_dotenv
 
 load_dotenv("config.env")
 
 
 def get_llm_response(prompt: str, timeout: int = 180,
-                     response_format: Optional[Dict[str, Any]] = None) -> str:
+                     response_format: Optional[ResponseFormat] = None) -> str:
     """Get LLM response via the shared llm_helper (llama-swap)."""
     from llm_helper import llm_generate
 
