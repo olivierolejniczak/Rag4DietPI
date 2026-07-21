@@ -71,16 +71,20 @@ CPU_COUNT=$(nproc)
 
 # profiling: CPU Score Profiling
 # Calculate CPU score based on cores and frequency
-CPU_MHZ=$(lscpu 2>/dev/null | awk -F': +' '/CPU max MHz/{print $2}' | cut -d'.' -f1)
+# LC_ALL=C : force le point decimal (sinon fr_FR donne "4700,0000" et la virgule
+# casse l'arithmetique bash). sed 's/[.,].*//' garde la partie entiere quel que
+# soit le separateur.
+CPU_MHZ=$(LC_ALL=C lscpu 2>/dev/null | awk -F': +' '/CPU max MHz/{print $2}' | sed 's/[.,].*//')
 if [ -z "$CPU_MHZ" ] || [ "$CPU_MHZ" = "0" ]; then
     # Fallback: try current MHz
-    CPU_MHZ=$(lscpu 2>/dev/null | awk -F': +' '/CPU MHz/{print $2}' | cut -d'.' -f1)
+    CPU_MHZ=$(LC_ALL=C lscpu 2>/dev/null | awk -F': +' '/CPU MHz/{print $2}' | sed 's/[.,].*//')
 fi
 if [ -z "$CPU_MHZ" ] || [ "$CPU_MHZ" = "0" ]; then
     # Last resort: read from cpuinfo
-    CPU_MHZ=$(cat /proc/cpuinfo | grep "cpu MHz" | head -1 | awk '{print $4}' | cut -d'.' -f1)
+    CPU_MHZ=$(awk '/cpu MHz/{print $4; exit}' /proc/cpuinfo | sed 's/[.,].*//')
 fi
-[ -z "$CPU_MHZ" ] && CPU_MHZ=1000  # Default fallback
+# Validation : uniquement des chiffres, sinon valeur de repli.
+case "$CPU_MHZ" in ''|*[!0-9]*) CPU_MHZ=1000 ;; esac
 
 CPU_SCORE=$((CPU_COUNT * CPU_MHZ / 1000))
 
