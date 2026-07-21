@@ -3332,7 +3332,8 @@ from dotenv import load_dotenv
 load_dotenv("config.env")
 
 
-def get_llm_response(prompt: str, timeout: int = 120, response_format=None) -> str:
+def get_llm_response(prompt: str, timeout: int = 120,
+                     response_format: Optional[Dict[str, Any]] = None) -> str:
     """Get LLM response via the shared llm_helper (llama-swap)."""
     from llm_helper import llm_generate
 
@@ -3570,13 +3571,14 @@ import re
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 
 load_dotenv("config.env")
 
 
-def get_llm_response(prompt: str, timeout: int = 180, response_format=None) -> str:
+def get_llm_response(prompt: str, timeout: int = 180,
+                     response_format: Optional[Dict[str, Any]] = None) -> str:
     """Get LLM response via the shared llm_helper (llama-swap)."""
     from llm_helper import llm_generate
 
@@ -4862,12 +4864,14 @@ cd "$SCRIPT_DIR"
 [ -f "./config.env" ] && { set -a; source ./config.env; set +a; }
 
 usage() {
-    echo "Usage: ./summarize.sh <document> [more documents...] [focus request...]"
+    local self
+    self="$(basename "$0")"
+    echo "Usage: ./$self <document> [more documents...] [focus request...]"
     echo ""
     echo "Examples:"
-    echo "  ./summarize.sh contract.pdf"
-    echo "  ./summarize.sh report.docx focus on recommendations"
-    echo "  ./summarize.sh ./docs/*.pdf            # summarize every match"
+    echo "  ./$self contract.pdf"
+    echo "  ./$self report.docx focus on recommendations"
+    echo "  ./$self ./docs/*.pdf            # summarize every match"
     echo ""
     echo "Map/Reduce Mode (System): summarizes entire documents via chunked"
     echo "processing. Multiple files are summarized in turn; all non-file"
@@ -4897,9 +4901,13 @@ for arg in "$@"; do
 done
 
 if [ "${#FILES[@]}" -eq 0 ]; then
-    echo "Error: no existing document given.${QUERY_PARTS:+ (non-file arguments: ${QUERY_PARTS[*]})}"
-    echo ""
-    usage
+    echo "Error: no existing document given." >&2
+    if [ "${#QUERY_PARTS[@]}" -gt 0 ]; then
+        echo "These arguments are not existing files:" >&2
+        printf '  - %s\n' "${QUERY_PARTS[@]}" >&2
+    fi
+    echo "" >&2
+    usage >&2
     exit 1
 fi
 
