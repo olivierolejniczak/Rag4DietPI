@@ -27,6 +27,10 @@ This project evolved through multiple development iterations, consolidating into
 - Ollama is fully uninstalled by the migration (binary, models, service, user).
   A `config.env.pre-llamaswap.bak` is kept for safety.
 - `status.sh` / `monitor.sh` now report the llama-swap backend.
+- Removed the unused `dual_cache.py` (the "2-layer" Qdrant/response cache was never
+  wired into the pipeline). Caching is query-level (`lib/query_cache.py` →
+  `cache/queries`); `monitor.sh`, `cache-stats.sh`, and `clear-cache.sh` now
+  target that cache (the latter previously cleared the wrong, empty dirs).
 
 ---
 

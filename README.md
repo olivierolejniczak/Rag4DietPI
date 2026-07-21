@@ -71,7 +71,7 @@ For non-DietPi systems, simply:
 - **Adaptive Models**: Embedding model selection based on RAM
 - **Qdrant Low-Memory Mode**: Disk-based storage for systems <8GB RAM
 - **Tiered Performance**: Quick/Default/Deep query modes
-- **2-Layer Caching**: Search results + LLM response caching
+- **Query Caching**: Query-level response cache with TTL
 
 ## Quick Start
 
@@ -218,8 +218,8 @@ CRAG_ENABLED=false
 REFLECTION_ENABLED=true
 
 # Cache
-QDRANT_CACHE_ENABLED=true
-RESPONSE_CACHE_ENABLED=true
+QUERY_CACHE_ENABLED=true
+QUERY_CACHE_TTL=3600
 ```
 
 ## Scripts Reference

@@ -387,24 +387,15 @@ ABSTENTION_ENABLED=true
 
 ## Caching System
 
-### Layer 1: Qdrant Search Cache
+### Query Cache
 
-Caches vector search results.
-
-```bash
-QDRANT_CACHE_ENABLED=true
-QDRANT_CACHE_DIR=./cache/qdrant
-QDRANT_CACHE_TTL=3600  # 1 hour
-```
-
-### Layer 2: Response Cache
-
-Caches full LLM responses.
+Caches the full result of a query, keyed by the query text and the active
+configuration. A repeated query within the TTL is served from `./cache/queries`
+without re-running retrieval or the LLM. Implemented in `lib/query_cache.py`.
 
 ```bash
-RESPONSE_CACHE_ENABLED=true
-RESPONSE_CACHE_DIR=./cache/responses
-RESPONSE_CACHE_TTL=86400  # 24 hours
+QUERY_CACHE_ENABLED=true
+QUERY_CACHE_TTL=3600  # 1 hour
 ```
 
 ### Cache Management

@@ -332,313 +332,6 @@ def get_tier_display():
 EOFPY
 log_ok "tiered_config.py"
 
-log_info "Creating dual_cache.py..."
-cat > "$PROJECT_DIR/lib/dual_cache.py" << 'EOFPY'
-"""Dual-Layer Caching System cache
-
-Provides two-layer caching:
-- Layer 1: Qdrant search results (volatile, 1h TTL)
-- Layer 2: LLM responses (persistent, 24h TTL)
-
-Reduces query latency by 80-90% for repeated queries.
-
-Feature: DUAL_CACHE
-Introduced: cache
-Lifecycle: ACTIVE
-
-Config:
-  QDRANT_CACHE_ENABLED=true|false
-  QDRANT_CACHE_DIR=./cache/qdrant
-  QDRANT_CACHE_TTL=3600
-  RESPONSE_CACHE_ENABLED=true|false
-  RESPONSE_CACHE_DIR=./cache/responses
-  RESPONSE_CACHE_TTL=86400
-  CACHE_DEBUG=true|false
-"""
-
-import os
-import sys
-import hashlib
-import json
-import time
-
-
-def _get_config():
-    """Get cache configuration from environment"""
-    return {
-        "qdrant_enabled": os.environ.get("QDRANT_CACHE_ENABLED", "true").lower() == "true",
-        "response_enabled": os.environ.get("RESPONSE_CACHE_ENABLED", "true").lower() == "true",
-        "qdrant_dir": os.environ.get("QDRANT_CACHE_DIR", "./cache/qdrant"),
-        "response_dir": os.environ.get("RESPONSE_CACHE_DIR", "./cache/responses"),
-        "qdrant_ttl": int(os.environ.get("QDRANT_CACHE_TTL", "3600")),
-        "response_ttl": int(os.environ.get("RESPONSE_CACHE_TTL", "86400")),
-        "debug": os.environ.get("CACHE_DEBUG", "false").lower() == "true",
-    }
-
-
-def _ensure_cache_dirs():
-    """Create cache directories if they don't exist"""
-    config = _get_config()
-    os.makedirs(config["qdrant_dir"], exist_ok=True)
-    os.makedirs(config["response_dir"], exist_ok=True)
-
-
-def _get_hash(text):
-    """Generate MD5 hash for cache key"""
-    return hashlib.md5(text.encode('utf-8')).hexdigest()
-
-
-# ========== Layer 1: Qdrant Search Cache ==========
-
-def get_cached_qdrant_results(query):
-    """Retrieve cached Qdrant search results
-    
-    Args:
-        query: Search query string
-    
-    Returns:
-        list: Cached results or None if cache miss
-    """
-    config = _get_config()
-    if not config["qdrant_enabled"]:
-        return None
-    
-    _ensure_cache_dirs()
-    query_hash = _get_hash(query)
-    cache_file = os.path.join(config["qdrant_dir"], f"{query_hash}.json")
-    
-    if not os.path.exists(cache_file):
-        return None
-    
-    # Check TTL
-    age = time.time() - os.path.getmtime(cache_file)
-    if age > config["qdrant_ttl"]:
-        try:
-            os.remove(cache_file)
-        except Exception:
-            pass
-        return None
-    
-    # Cache hit
-    try:
-        with open(cache_file, 'r', encoding='utf-8') as f:
-            results = json.load(f)
-        
-        if config["debug"]:
-            print(f"[CACHE] Qdrant hit ({int(age)}s old)", file=sys.stderr)
-        
-        return results
-    except Exception as e:
-        if config["debug"]:
-            print(f"[CACHE] Qdrant read error: {e}", file=sys.stderr)
-        return None
-
-
-def cache_qdrant_results(query, results):
-    """Store Qdrant search results in cache
-    
-    Args:
-        query: Search query string
-        results: Search results to cache
-    """
-    config = _get_config()
-    if not config["qdrant_enabled"]:
-        return
-    
-    _ensure_cache_dirs()
-    query_hash = _get_hash(query)
-    cache_file = os.path.join(config["qdrant_dir"], f"{query_hash}.json")
-    
-    try:
-        with open(cache_file, 'w', encoding='utf-8') as f:
-            json.dump(results, f)
-        
-        if config["debug"]:
-            print(f"[CACHE] Qdrant stored", file=sys.stderr)
-    except Exception as e:
-        if config["debug"]:
-            print(f"[CACHE] Qdrant write error: {e}", file=sys.stderr)
-
-
-# ========== Layer 2: LLM Response Cache ==========
-
-def get_cached_response(query, context_hash=None):
-    """Retrieve cached LLM response
-    
-    Args:
-        query: Query string
-        context_hash: Optional hash of context (for cache key)
-    
-    Returns:
-        str: Cached response or None if cache miss
-    """
-    config = _get_config()
-    if not config["response_enabled"]:
-        return None
-    
-    _ensure_cache_dirs()
-    
-    # Use query + context for more precise cache key
-    if context_hash:
-        combined = f"{query}|{context_hash}"
-    else:
-        combined = query
-    
-    combined_hash = _get_hash(combined)
-    cache_file = os.path.join(config["response_dir"], f"{combined_hash}.txt")
-    
-    if not os.path.exists(cache_file):
-        return None
-    
-    # Check TTL
-    age = time.time() - os.path.getmtime(cache_file)
-    if age > config["response_ttl"]:
-        try:
-            os.remove(cache_file)
-        except Exception:
-            pass
-        return None
-    
-    # Cache hit
-    try:
-        with open(cache_file, 'r', encoding='utf-8') as f:
-            response = f.read()
-        
-        if config["debug"]:
-            print(f"[CACHE] Response hit ({int(age/3600)}h old)", file=sys.stderr)
-        
-        return response
-    except Exception as e:
-        if config["debug"]:
-            print(f"[CACHE] Response read error: {e}", file=sys.stderr)
-        return None
-
-
-def cache_response(query, response, context_hash=None):
-    """Store LLM response in cache
-    
-    Args:
-        query: Query string
-        response: LLM response to cache
-        context_hash: Optional hash of context
-    """
-    config = _get_config()
-    if not config["response_enabled"]:
-        return
-    
-    _ensure_cache_dirs()
-    
-    if context_hash:
-        combined = f"{query}|{context_hash}"
-    else:
-        combined = query
-    
-    combined_hash = _get_hash(combined)
-    cache_file = os.path.join(config["response_dir"], f"{combined_hash}.txt")
-    
-    try:
-        with open(cache_file, 'w', encoding='utf-8') as f:
-            f.write(response)
-        
-        if config["debug"]:
-            print(f"[CACHE] Response stored", file=sys.stderr)
-    except Exception as e:
-        if config["debug"]:
-            print(f"[CACHE] Response write error: {e}", file=sys.stderr)
-
-
-def get_context_hash(chunks):
-    """Generate hash of context chunks for cache key
-    
-    Args:
-        chunks: List of context chunks
-    
-    Returns:
-        str: MD5 hash of combined chunk text
-    """
-    texts = []
-    for chunk in chunks:
-        if isinstance(chunk, dict):
-            if 'payload' in chunk and 'text' in chunk['payload']:
-                texts.append(chunk['payload']['text'][:200])
-            elif 'text' in chunk:
-                texts.append(chunk['text'][:200])
-        else:
-            texts.append(str(chunk)[:200])
-    
-    combined = '|'.join(texts)
-    return _get_hash(combined)
-
-
-def clear_cache(cache_type=None):
-    """Clear cache files
-    
-    Args:
-        cache_type: 'qdrant', 'response', or None for both
-    """
-    config = _get_config()
-    
-    if cache_type in (None, 'qdrant'):
-        qdrant_dir = config["qdrant_dir"]
-        if os.path.exists(qdrant_dir):
-            for f in os.listdir(qdrant_dir):
-                if f.endswith('.json'):
-                    try:
-                        os.remove(os.path.join(qdrant_dir, f))
-                    except Exception:
-                        pass
-    
-    if cache_type in (None, 'response'):
-        response_dir = config["response_dir"]
-        if os.path.exists(response_dir):
-            for f in os.listdir(response_dir):
-                if f.endswith('.txt'):
-                    try:
-                        os.remove(os.path.join(response_dir, f))
-                    except Exception:
-                        pass
-
-
-def get_cache_stats():
-    """Get cache statistics
-    
-    Returns:
-        dict: Cache statistics
-    """
-    config = _get_config()
-    stats = {
-        "qdrant_enabled": config["qdrant_enabled"],
-        "response_enabled": config["response_enabled"],
-        "qdrant_count": 0,
-        "response_count": 0,
-        "qdrant_size": 0,
-        "response_size": 0,
-    }
-    
-    if os.path.exists(config["qdrant_dir"]):
-        for f in os.listdir(config["qdrant_dir"]):
-            if f.endswith('.json'):
-                stats["qdrant_count"] += 1
-                try:
-                    stats["qdrant_size"] += os.path.getsize(
-                        os.path.join(config["qdrant_dir"], f))
-                except Exception:
-                    pass
-    
-    if os.path.exists(config["response_dir"]):
-        for f in os.listdir(config["response_dir"]):
-            if f.endswith('.txt'):
-                stats["response_count"] += 1
-                try:
-                    stats["response_size"] += os.path.getsize(
-                        os.path.join(config["response_dir"], f))
-                except Exception:
-                    pass
-    
-    return stats
-EOFPY
-log_ok "dual_cache.py"
-
 log_info "Creating spellcheck.py..."
 cat > "$PROJECT_DIR/lib/spellcheck.py" << 'EOFPY'
 """Spellcheck module using pyspellchecker with whitelist support
@@ -5241,7 +4934,7 @@ cat > "$PROJECT_DIR/test-rag-System.sh" << 'EOFTEST'
 #!/bin/bash
 # test-rag-System.sh
 # RAG System - Self-Contained Test Suite
-# Tests all cache features: Tiered Performance, 2-Layer Cache, Monitoring
+# Tests all cache features: Tiered Performance, Query Cache, Monitoring
 # Generates its own test documents for any fresh deployment
 #
 # Usage:
@@ -5947,17 +5640,13 @@ run_test "tiered_config.py module" \
 echo ""
 
 # ----------------------------------------------------------------------------
-# 14. cache Features - 2-Layer Cache
+# 14. cache Features - Query Cache
 # ----------------------------------------------------------------------------
-echo -e "${BLUE}=== 14. cache 2-Layer Cache ===${NC}"
+echo -e "${BLUE}=== 14. cache Query Cache ===${NC}"
 
-run_test "dual_cache.py module" \
-    "python3 -c \"from lib.dual_cache import get_cache_stats; print(get_cache_stats())\"" \
-    "qdrant_enabled|response_enabled" \
-    10
 
-run_test "Cache directories exist" \
-    "mkdir -p ./cache/qdrant ./cache/responses && [ -d ./cache/qdrant ] && [ -d ./cache/responses ]" \
+run_test "Cache directory exists" \
+    "mkdir -p ./cache/queries && [ -d ./cache/queries ]" \
     "" \
     5
 
@@ -6291,7 +5980,6 @@ python3 -c "import requests" 2>/dev/null && log_ok "requests" || log_err "reques
 [ -f "$PROJECT_DIR/lib/hybrid_search.py" ] && log_ok "hybrid_search.py" || log_err "hybrid_search.py"
 [ -f "$PROJECT_DIR/lib/web_only_query.py" ] && log_ok "web_only_query.py" || log_err "web_only_query.py"
 [ -f "$PROJECT_DIR/lib/tiered_config.py" ] && log_ok "tiered_config.py" || log_err "tiered_config.py"
-[ -f "$PROJECT_DIR/lib/dual_cache.py" ] && log_ok "dual_cache.py" || log_err "dual_cache.py"
 [ -f "$PROJECT_DIR/query-tiered-cache.sh" ] && log_ok "query-tiered-cache.sh" || log_err "query-tiered-cache.sh"
 [ -f "$PROJECT_DIR/lib/map_reduce.py" ] && log_ok "map_reduce.py (System)" || log_err "map_reduce.py"
 [ -f "$PROJECT_DIR/lib/extraction.py" ] && log_ok "extraction.py (System)" || log_err "extraction.py"
@@ -6324,7 +6012,7 @@ echo "  - French OCR, legacy .doc support"
 echo ""
 echo "cache Features (preserved):"
 echo "  - Tiered performance (quick/default/deep)"
-echo "  - 2-layer cache, monitoring"
+echo "  - query cache, monitoring"
 echo ""
 echo "All Features (quality-web):"
 echo "  - Hybrid search, CRAG, FlashRank"

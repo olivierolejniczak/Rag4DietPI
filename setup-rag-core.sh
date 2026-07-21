@@ -716,18 +716,10 @@ NUM_PREDICT_DEEP=2000
 QUERY_MODE_DEFAULT=default
 
 # ============================================================================
-# 2-LAYER CACHING SYSTEM (cache)
+# QUERY CACHE (cache)
 # ============================================================================
-
-# Layer 1: Qdrant Search Results Cache (volatile)
-QDRANT_CACHE_ENABLED=true
-QDRANT_CACHE_DIR=./cache/qdrant
-QDRANT_CACHE_TTL=3600
-
-# Layer 2: LLM Response Cache (persistent)
-RESPONSE_CACHE_ENABLED=true
-RESPONSE_CACHE_DIR=./cache/responses
-RESPONSE_CACHE_TTL=86400
+# La mise en cache se fait au niveau requete : lib/query_cache.py -> ./cache/queries
+# (voir QUERY_CACHE_ENABLED / QUERY_CACHE_TTL plus bas).
 
 # Cache debug output
 CACHE_DEBUG=false
@@ -1209,9 +1201,7 @@ while true; do
   
   # ========== Cache Status ==========
   echo -e "${BLUE}▌ Cache Status${NC}"
-  # Query cache = the layer actually used by the pipeline (lib/query_cache.py,
-  # QueryCache -> $CACHE_DIR/queries). NB: the dual_cache qdrant/response layers
-  # exist in lib/ but are not wired into query_main, so they never populate.
+  # Query cache used by the pipeline (lib/query_cache.py -> $CACHE_DIR/queries).
   QUERY_CACHE_D="${CACHE_DIR:-./cache}/queries"
   if [ -d "$QUERY_CACHE_D" ]; then
     QUERY_CACHE=$(find "$QUERY_CACHE_D" -name "*.json" -type f 2>/dev/null | wc -l)
@@ -1278,50 +1268,6 @@ if [ -d "$QUERY_CACHE_D" ]; then
   echo ""
 fi
 
-# ========== Qdrant Cache (legacy dual_cache layer — not wired into query_main) ==========
-if [ -d "${QDRANT_CACHE_DIR:-./cache/qdrant}" ]; then
-  echo -e "${GREEN}Qdrant Search Cache (legacy/unused):${NC}"
-  
-  QDRANT_FILES=$(find "${QDRANT_CACHE_DIR:-./cache/qdrant}" -name "*.json" -type f 2>/dev/null | wc -l)
-  QDRANT_SIZE=$(du -sh "${QDRANT_CACHE_DIR:-./cache/qdrant}" 2>/dev/null | cut -f1 || echo "0")
-  
-  echo "  Files: $QDRANT_FILES"
-  
-  if [ $QDRANT_FILES -gt 0 ]; then
-    OLDEST_FILE=$(find "${QDRANT_CACHE_DIR:-./cache/qdrant}" -name "*.json" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | head -1 | cut -d' ' -f2)
-    if [ -n "$OLDEST_FILE" ] && [ -f "$OLDEST_FILE" ]; then
-      OLDEST_AGE=$(( $(date +%s) - $(stat -c%Y "$OLDEST_FILE" 2>/dev/null || echo "0") ))
-      echo "  Oldest: $((OLDEST_AGE / 3600))h ago"
-    fi
-  fi
-  
-  echo "  Size: $QDRANT_SIZE"
-  echo "  TTL: ${QDRANT_CACHE_TTL:-3600}s"
-  echo ""
-fi
-
-# ========== Response Cache (legacy dual_cache layer — not wired into query_main) ==========
-if [ -d "${RESPONSE_CACHE_DIR:-./cache/responses}" ]; then
-  echo -e "${GREEN}LLM Response Cache (legacy/unused):${NC}"
-  
-  RESPONSE_FILES=$(find "${RESPONSE_CACHE_DIR:-./cache/responses}" -name "*.txt" -type f 2>/dev/null | wc -l)
-  RESPONSE_SIZE=$(du -sh "${RESPONSE_CACHE_DIR:-./cache/responses}" 2>/dev/null | cut -f1 || echo "0")
-  
-  echo "  Files: $RESPONSE_FILES"
-  
-  if [ $RESPONSE_FILES -gt 0 ]; then
-    OLDEST_FILE=$(find "${RESPONSE_CACHE_DIR:-./cache/responses}" -name "*.txt" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | head -1 | cut -d' ' -f2)
-    if [ -n "$OLDEST_FILE" ] && [ -f "$OLDEST_FILE" ]; then
-      OLDEST_AGE=$(( $(date +%s) - $(stat -c%Y "$OLDEST_FILE" 2>/dev/null || echo "0") ))
-      echo "  Oldest: $((OLDEST_AGE / 3600))h ago"
-    fi
-  fi
-  
-  echo "  Size: $RESPONSE_SIZE"
-  echo "  TTL: ${RESPONSE_CACHE_TTL:-86400}s"
-  echo ""
-fi
-
 # ========== FastEmbed Model Cache ==========
 if [ -d "./cache/fastembed" ]; then
   echo -e "${GREEN}FastEmbed Model Cache:${NC}"
@@ -1366,16 +1312,11 @@ set -a; source ./config.env 2>/dev/null || true; set +a
 
 echo "Clearing query caches..."
 
-# Clear Qdrant cache
-if [ -d "${QDRANT_CACHE_DIR:-./cache/qdrant}" ]; then
-  rm -f "${QDRANT_CACHE_DIR:-./cache/qdrant}"/*.json 2>/dev/null
-  echo "[OK] Qdrant cache cleared"
-fi
-
-# Clear Response cache
-if [ -d "${RESPONSE_CACHE_DIR:-./cache/responses}" ]; then
-  rm -f "${RESPONSE_CACHE_DIR:-./cache/responses}"/*.txt 2>/dev/null
-  echo "[OK] Response cache cleared"
+# Clear query cache (lib/query_cache.py -> ./cache/queries)
+QUERY_CACHE_D="${CACHE_DIR:-./cache}/queries"
+if [ -d "$QUERY_CACHE_D" ]; then
+  rm -f "$QUERY_CACHE_D"/*.json 2>/dev/null
+  echo "[OK] Query cache cleared"
 fi
 
 # Clear conversation memory
@@ -1385,8 +1326,7 @@ if [ -f "${MEMORY_FILE:-./cache/memory.json}" ]; then
 fi
 
 # Recreate directories
-mkdir -p "${QDRANT_CACHE_DIR:-./cache/qdrant}"
-mkdir -p "${RESPONSE_CACHE_DIR:-./cache/responses}"
+mkdir -p "$QUERY_CACHE_D"
 
 echo ""
 echo "Cache cleared successfully"
@@ -1444,7 +1384,7 @@ echo "  - French OCR, legacy .doc support"
 echo "  - Qdrant low-memory tuning"
 echo ""
 echo "cache Features (preserved):"
-echo "  - Tiered performance, 2-layer cache, monitoring"
+echo "  - Tiered performance, query cache, monitoring"
 echo ""
 echo "Next steps:"
 echo "  bash setup-rag-ingest-System.sh"
