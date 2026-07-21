@@ -43,9 +43,14 @@ trap 'log_err "Echec inattendu (ligne $LINENO). Rien n'"'"'a ete desactive de fo
 # Configuration
 # ============================================================================
 PROJECT_DIR="${1:-$(pwd)}"
-MODELS_DIR="$PROJECT_DIR/models"
-YAML_PATH="$PROJECT_DIR/llama-swap.yaml"
 CONFIG_ENV="$PROJECT_DIR/config.env"
+# Les actifs du service (modeles GGUF + YAML) vivent HORS de PROJECT_DIR, dans un
+# emplacement systeme appartenant a ragsvc. Indispensable quand PROJECT_DIR est
+# sous /home : sinon le service (User=ragsvc + ProtectHome) ne peut ni traverser
+# le home ni lire le YAML ("permission denied").
+LLM_STATE_DIR="/var/lib/rag-llm"
+MODELS_DIR="$LLM_STATE_DIR/models"
+YAML_PATH="$LLM_STATE_DIR/llama-swap.yaml"
 SERVICE_NAME="rag-llm.service"
 LISTEN_ADDR="127.0.0.1:11434"   # on reutilise le port d'Ollama pour minimiser les changements
 SVC_USER="ragsvc"
@@ -275,10 +280,9 @@ if ! id "$SVC_USER" >/dev/null 2>&1; then
     log_ok "Utilisateur systeme $SVC_USER cree."
 fi
 
-# Droits : ragsvc doit lire les modeles et la config, sans droit d'ecriture ailleurs.
-chown -R "$SVC_USER:$SVC_USER" "$MODELS_DIR"
-chmod 750 "$MODELS_DIR"
-chown root:"$SVC_USER" "$YAML_PATH"
+# Droits : tout l'etat du service (modeles + YAML) appartient a ragsvc.
+chown -R "$SVC_USER:$SVC_USER" "$LLM_STATE_DIR"
+chmod 750 "$LLM_STATE_DIR" "$MODELS_DIR"
 chmod 640 "$YAML_PATH"
 
 log_info "Installation du service $SERVICE_NAME…"
@@ -301,7 +305,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=${PROJECT_DIR}
+ReadWritePaths=${LLM_STATE_DIR}
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
@@ -352,8 +356,21 @@ log_ok "config.env mis a jour (LLM_API_BASE + mapping des tiers)."
 if systemctl list-unit-files 2>/dev/null | grep -q '^ollama'; then
     systemctl disable --now ollama 2>/dev/null || warn "Impossible de desactiver le service ollama."
     log_ok "Service ollama stoppe et desactive."
-else
-    warn "Aucun service systemd ollama detecte (Ollama lance manuellement ?). Arretez-le a la main si necessaire."
+fi
+# Robustesse : Ollama peut tourner SANS unite systemd (ex. 'ollama serve' lance
+# a la main). On termine tout process residuel qui tiendrait encore le port.
+if pgrep -f 'ollama serve' >/dev/null 2>&1 || pgrep -x ollama >/dev/null 2>&1; then
+    pkill -f 'ollama serve' 2>/dev/null || true
+    pkill -x ollama 2>/dev/null || true
+    log_ok "Process Ollama residuels termines."
+fi
+# Le port 11434 doit etre libre avant de demarrer llama-swap.
+for _ in $(seq 1 10); do
+    ss -ltn 2>/dev/null | grep -q '127.0.0.1:11434' || break
+    sleep 1
+done
+if ss -ltn 2>/dev/null | grep -q '127.0.0.1:11434'; then
+    warn "Le port 11434 est encore occupe — llama-swap risque de ne pas demarrer (ss -ltnp | grep 11434)."
 fi
 
 # Demarrage du nouveau backend.
@@ -371,11 +388,21 @@ for _ in $(seq 1 30); do
     fi
     sleep 1
 done
+# On verifie que le port expose bien NOS modeles rag-*, et pas un autre backend
+# (ex. Ollama residuel) qui repondrait sur le meme port.
 if [ "$OK" = true ]; then
-    log_ok "llama-swap repond. Modeles exposes :"
-    curl -sf "http://${LISTEN_ADDR}/v1/models" | python3 -c 'import sys,json;[print("  -",m["id"]) for m in json.load(sys.stdin).get("data",[])]' 2>/dev/null || true
-else
-    warn "llama-swap ne repond pas encore. Verifiez : journalctl -u ${SERVICE_NAME} -n 50"
+    MODELS_JSON="$(curl -sf "http://${LISTEN_ADDR}/v1/models" 2>/dev/null)"
+    if printf '%s' "$MODELS_JSON" | grep -q '"rag-'; then
+        log_ok "llama-swap repond. Modeles exposes :"
+        printf '%s' "$MODELS_JSON" | python3 -c 'import sys,json;[print("  -",m["id"]) for m in json.load(sys.stdin).get("data",[])]' 2>/dev/null || true
+    else
+        OK=false
+        warn "Le port 11434 repond mais n'expose PAS les modeles rag-* (backend residuel ?)."
+        warn "Verifiez : ss -ltnp | grep 11434 ; journalctl -u ${SERVICE_NAME} -n 30"
+    fi
+fi
+if [ "$OK" != true ]; then
+    warn "Backend llama-swap non operationnel. Verifiez : journalctl -u ${SERVICE_NAME} -n 50"
     warn "Si l'erreur porte sur le format du YAML, alignez llama-swap.yaml sur le schema de la version installee (llama-swap --help)."
 fi
 

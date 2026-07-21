@@ -294,7 +294,7 @@ curl -sf http://127.0.0.1:11434/v1/models | python3 -m json.tool
 sudo bash setup-rag-llm-backend.sh
 sudo bash rollback-llama-swap.sh
 
-# Check disk space (GGUF models live in ./models)
+# Check disk space (GGUF models live in /var/lib/rag-llm/models)
 df -h
 ```
 

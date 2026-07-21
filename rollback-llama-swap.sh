@@ -72,4 +72,4 @@ fi
 
 echo ""
 log_ok "Rollback termine. Verifiez : ./status.sh"
-log_info "Les binaires llama-swap/llama-server et les GGUF ($PROJECT_DIR/models) sont conserves."
+log_info "Les binaires llama-swap/llama-server et les GGUF (/var/lib/rag-llm/models) sont conserves."
