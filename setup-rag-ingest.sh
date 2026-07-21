@@ -302,7 +302,10 @@ def smart_chunk(text, chunk_size=500, chunk_overlap=80, min_chunk_size=100, max_
     # cap, so no emitted section chunk exceeds max_chunk_size — even if pending
     # grew past it or chunk_size is misconfigured >= max_chunk_size.
     def flush(buf):
-        buf = buf.strip()
+        # _make_chunk() already strips the emitted text, so we don't trim buf
+        # here — that would drop meaningful separators between packed sections.
+        if not buf.strip():
+            return
         # Split target must be <= the cap (chunk_size may be misconfigured above
         # max_chunk_size); clamp the point so every emitted piece is <= the cap.
         cap = max(1, min(chunk_size, max_chunk_size))
@@ -311,8 +314,8 @@ def smart_chunk(text, chunk_size=500, chunk_overlap=80, min_chunk_size=100, max_
             if split_point < 1:
                 split_point = max_chunk_size
             chunks.append(_make_chunk(buf[:split_point], "section"))
-            buf = buf[max(split_point - chunk_overlap, 1):].strip()
-        if buf:
+            buf = buf[max(split_point - chunk_overlap, 1):]
+        if buf.strip():
             chunks.append(_make_chunk(buf, "section"))
 
     pending = ""
