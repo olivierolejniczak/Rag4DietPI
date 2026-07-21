@@ -4836,32 +4836,42 @@ cd "$SCRIPT_DIR"
 [ -f "./config.env" ] && { set -a; source ./config.env; set +a; }
 
 if [ -z "$1" ]; then
-    echo "Usage: ./summarize.sh <document> [specific request]"
+    echo "Usage: ./summarize.sh <document> [more documents...] [\"focus request\"]"
     echo ""
     echo "Examples:"
     echo "  ./summarize.sh contract.pdf"
     echo "  ./summarize.sh report.docx 'focus on recommendations'"
+    echo "  ./summarize.sh ./docs/*.pdf            # summarize every match"
     echo ""
     echo "Map/Reduce Mode (System): Summarizes entire document using"
-    echo "chunked processing for long documents."
+    echo "chunked processing for long documents. Multiple files are summarized"
+    echo "in turn; a single non-file argument is used as the focus request."
     exit 1
 fi
 
-FILE_PATH="$1"
-QUERY="${2:-Summarize this document}"
+# Separate existing files from an optional focus prompt. A glob like *.pdf
+# expands to many paths; summarize each instead of silently dropping the rest
+# and mistaking the 2nd file path for the focus prompt. A single non-file
+# argument is treated as the focus prompt and applied to every document.
+FILES=()
+QUERY=""
+for arg in "$@"; do
+    if [ -f "$arg" ]; then
+        FILES+=("$arg")
+    elif [ -z "$QUERY" ]; then
+        QUERY="$arg"
+    else
+        echo "Warning: ignoring unrecognized argument (not a file): $arg" >&2
+    fi
+done
 
-if [ ! -f "$FILE_PATH" ]; then
-    echo "Error: File not found: $FILE_PATH"
+if [ "${#FILES[@]}" -eq 0 ]; then
+    echo "Error: no existing document given.${QUERY:+ (\"$QUERY\" is not a file)}"
+    echo "Usage: ./summarize.sh <document> [more documents...] [\"focus request\"]"
     exit 1
 fi
 
-echo "============================================"
-echo " RAG System - Document Summarization"
-echo "============================================"
-echo ""
-echo "File: $FILE_PATH"
-echo "Request: $QUERY"
-echo ""
+QUERY="${QUERY:-Summarize this document}"
 
 export OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
 export LLM_MODEL="${LLM_MODEL:-rag-default}"
@@ -4869,7 +4879,22 @@ export MAPREDUCE_CHUNK_SIZE="${MAPREDUCE_CHUNK_SIZE:-4000}"
 export MAPREDUCE_BATCH_SIZE="${MAPREDUCE_BATCH_SIZE:-3}"
 export MAPREDUCE_CHUNK_TIMEOUT="${MAPREDUCE_CHUNK_TIMEOUT:-120}"
 
-python3 ./lib/map_reduce.py "$FILE_PATH" "$QUERY"
+echo "============================================"
+echo " RAG System - Document Summarization"
+echo "============================================"
+echo ""
+[ "${#FILES[@]}" -gt 1 ] && echo "Documents: ${#FILES[@]} | Request: $QUERY" && echo ""
+
+rc=0
+for FILE_PATH in "${FILES[@]}"; do
+    [ "${#FILES[@]}" -gt 1 ] && echo "────────────────────────────────────────────"
+    echo "File: $FILE_PATH"
+    echo "Request: $QUERY"
+    echo ""
+    python3 ./lib/map_reduce.py "$FILE_PATH" "$QUERY" || rc=1
+    echo ""
+done
+exit $rc
 EOFSH
 chmod +x "$PROJECT_DIR/summarize.sh"
 log_ok "summarize.sh (System)"
