@@ -240,28 +240,59 @@ log_info "RAM detectee : ${RAM_GB} Go — selection des modeles."
 
 mkdir -p "$MODELS_DIR"
 
-# Contextes dimensionnes pour CPU/RAM contraints.
-if [ "$RAM_GB" -lt 8 ]; then
-    # <8 Go : un seul modele (1.5b) ; les 3 tiers pointent dessus avec des
-    # contextes croissants (jamais un modele que le profil ne peut charger).
-    hf_download "$REPO_Q15" "$FILE_Q15" "$MODELS_DIR/$FILE_Q15"
-    M_QUICK="$FILE_Q15"; M_DEFAULT="$FILE_Q15"; M_DEEP="$FILE_Q15"
-    CTX_QUICK=2048; CTX_DEFAULT=4096; CTX_DEEP=4096
-elif [ "$RAM_GB" -lt 12 ]; then
-    # 8-12 Go : 1.5b (quick) + 3b (default/deep).
-    hf_download "$REPO_Q15" "$FILE_Q15" "$MODELS_DIR/$FILE_Q15"
-    hf_download "$REPO_Q3"  "$FILE_Q3"  "$MODELS_DIR/$FILE_Q3"
-    M_QUICK="$FILE_Q15"; M_DEFAULT="$FILE_Q3"; M_DEEP="$FILE_Q3"
-    CTX_QUICK=4096; CTX_DEFAULT=8192; CTX_DEEP=8192
+# ----------------------------------------------------------------------------
+# Selection des tiers par empreinte memoire estimee (plutot qu'un seuil fixe).
+#
+# On choisit, pour chaque tier, le plus gros modele dont l'empreinte crete tient
+# dans le budget RAM disponible :
+#   budget = RAM_totale - RESERVED
+#   empreinte(modele) ~= poids Q4_K_M resident + buffers calcul (~600 Mo)
+#                        + cache KV(ctx)
+# Le cache KV fp16 = 2(K+V) * n_layers * n_kv_heads * head_dim * ctx * 2 octets
+# est faible ici (GQA) : ~0,45 Go pour le 7B @8k, negligeable devant les poids.
+# On pre-calcule donc une empreinte crete par modele@ctx (en Mo).
+# RESERVED couvre Docker+Qdrant+SearXNG (~0,5 Go), FastEmbed+Splade+process de
+# requete (~1,3 Go), OS + marge (~1,7 Go).
+# ----------------------------------------------------------------------------
+RAM_MB=$(( RAM_KB / 1024 ))
+RESERVED_MB="${LLM_RESERVED_MB:-3500}"       # surchargeable via config.env
+BUDGET_MB=$(( RAM_MB - RESERVED_MB ))
+[ "$BUDGET_MB" -lt 0 ] && BUDGET_MB=0
+
+NEED_Q15=1800   # 1.5b Q4_K_M @ 4k  (~1,1 Go poids + 0,6 buffers + ~0,1 KV)
+NEED_Q3=2900    # 3b   Q4_K_M @ 8k  (~2,0 Go poids + 0,6 buffers + ~0,3 KV)
+NEED_Q7=5850    # 7b   Q4_K_M @ 8k  (~4,8 Go poids + 0,6 buffers + ~0,45 KV)
+
+log_info "RAM ${RAM_GB} Go — budget LLM estime : ${BUDGET_MB} Mo (reserve ${RESERVED_MB} Mo)."
+
+# quick : toujours le 1.5b (le plus rapide) ; contexte reduit si RAM tres serree.
+hf_download "$REPO_Q15" "$FILE_Q15" "$MODELS_DIR/$FILE_Q15"
+M_QUICK="$FILE_Q15"
+if [ "$BUDGET_MB" -ge "$NEED_Q15" ]; then CTX_QUICK=4096; else CTX_QUICK=2048; fi
+
+# default : 3b s'il tient dans le budget, sinon repli sur le 1.5b.
+if [ "$BUDGET_MB" -ge "$NEED_Q3" ]; then
+    hf_download "$REPO_Q3" "$FILE_Q3" "$MODELS_DIR/$FILE_Q3"
+    M_DEFAULT="$FILE_Q3"; CTX_DEFAULT=8192
 else
-    # 12 Go+ : les trois tiers (7b Q4_K_M ~4.7 Go tient en RAM avec de la marge).
-    # Le 7B est scinde en shards : on telecharge tout et on pointe sur le 1er.
-    hf_download "$REPO_Q15" "$FILE_Q15" "$MODELS_DIR/$FILE_Q15"
-    hf_download "$REPO_Q3"  "$FILE_Q3"  "$MODELS_DIR/$FILE_Q3"
-    Q7_MAIN="$(hf_download_q4km "$REPO_Q7" "$MODELS_DIR")"
-    M_QUICK="$FILE_Q15"; M_DEFAULT="$FILE_Q3"; M_DEEP="$Q7_MAIN"
-    CTX_QUICK=4096; CTX_DEFAULT=8192; CTX_DEEP=8192
+    M_DEFAULT="$FILE_Q15"; CTX_DEFAULT="$CTX_QUICK"
 fi
+
+# deep : le plus gros modele dont l'empreinte tient (7b > 3b > 1.5b).
+if [ "$BUDGET_MB" -ge "$NEED_Q7" ]; then
+    # Le 7B est scinde en shards : on telecharge tout et on pointe sur le 1er.
+    Q7_MAIN="$(hf_download_q4km "$REPO_Q7" "$MODELS_DIR")"
+    M_DEEP="$Q7_MAIN"; CTX_DEEP=8192
+elif [ "$BUDGET_MB" -ge "$NEED_Q3" ]; then
+    hf_download "$REPO_Q3" "$FILE_Q3" "$MODELS_DIR/$FILE_Q3"  # no-op si deja present
+    M_DEEP="$FILE_Q3"; CTX_DEEP=8192
+else
+    M_DEEP="$FILE_Q15"; CTX_DEEP="$CTX_QUICK"
+fi
+
+# Etiquette lisible (taille) pour le journal, ex. "3b" / "7b".
+_sz() { echo "$1" | grep -oE '[0-9.]+b' | head -1; }
+log_info "Tiers retenus : quick=$(_sz "$M_QUICK")(@${CTX_QUICK}) default=$(_sz "$M_DEFAULT")(@${CTX_DEFAULT}) deep=$(_sz "$M_DEEP")(@${CTX_DEEP})."
 
 # Modele d'embedding (repli ; FastEmbed reste primaire).
 hf_download "$REPO_EMB" "$FILE_EMB" "$MODELS_DIR/$FILE_EMB"
