@@ -5,13 +5,13 @@
 # Installe llama-swap (proxy hot-swap, binaire Go statique) et llama-server
 # (llama.cpp, compile avec optimisations CPU natives), telecharge les modeles
 # GGUF selon le profil materiel detecte, genere llama-swap.yaml + le service
-# systemd rag-llm.service, stoppe/desactive Ollama, puis adapte config.env.
+# systemd rag-llm.service, desinstalle Ollama, puis adapte config.env.
 #
 # Contraintes :
 #   - Offline-first : les seuls telechargements ont lieu ICI, a l'installation,
 #     avec verification de checksum (SHA256 GitHub + OID LFS HuggingFace).
 #   - Idempotent : relancable sans dommage.
-#   - Reversible : sauvegarde config.env + rollback-llama-swap.sh reactive Ollama.
+#   - Une sauvegarde config.env.pre-llamaswap.bak est conservee par securite.
 #
 # Usage : sudo bash setup-rag-llm-backend.sh [PROJECT_DIR]
 
@@ -64,7 +64,6 @@ REPO_EMB="CompendiumLabs/bge-base-en-v1.5-gguf"
 
 FILE_Q15="qwen2.5-1.5b-instruct-q4_k_m.gguf"
 FILE_Q3="qwen2.5-3b-instruct-q4_k_m.gguf"
-FILE_Q7="qwen2.5-7b-instruct-q4_k_m.gguf"
 # bge-base-en-v1.5 en f16 : meme famille/dimension (768) que FastEmbed -> pas de
 # reindexation. FastEmbed reste la source primaire ; llama-swap ne sert les
 # embeddings qu'en repli (voir lib/llm_helper.py).
@@ -136,6 +135,29 @@ hf_download() {
     fi
     download_verified "https://huggingface.co/${repo}/resolve/main/${file}?download=true" "$dest" "$expected"
     log_ok "$file"
+}
+
+# hf_download_q4km <repo> <dest_dir>
+# Telecharge TOUS les fichiers Q4_K_M .gguf d'un depot (gere le cas des modeles
+# scindes en shards, ex. 7B = *-00001-of-00002.gguf) et renvoie le 1er shard,
+# celui a passer a llama-server (-m) qui charge automatiquement les suivants.
+hf_download_q4km() {
+    local repo="$1" dir="$2" files f first
+    files="$(curl -fsSL "https://huggingface.co/api/models/${repo}" 2>/dev/null \
+        | python3 -c 'import sys,json; d=json.load(sys.stdin); [print(s["rfilename"]) for s in d.get("siblings",[]) if s["rfilename"].lower().endswith(".gguf") and "q4_k_m" in s["rfilename"].lower()]' \
+        | sort)"
+    if [ -z "$files" ]; then
+        log_err "Aucun fichier Q4_K_M trouve dans $repo"
+        return 1
+    fi
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        hf_download "$repo" "$f" "$dir/$f" >&2
+    done <<EOF
+$files
+EOF
+    first="$(printf '%s\n' "$files" | head -1)"
+    printf '%s' "$first"
 }
 
 # ============================================================================
@@ -225,18 +247,19 @@ if [ "$RAM_GB" -lt 8 ]; then
     hf_download "$REPO_Q15" "$FILE_Q15" "$MODELS_DIR/$FILE_Q15"
     M_QUICK="$FILE_Q15"; M_DEFAULT="$FILE_Q15"; M_DEEP="$FILE_Q15"
     CTX_QUICK=2048; CTX_DEFAULT=4096; CTX_DEEP=4096
-elif [ "$RAM_GB" -lt 16 ]; then
-    # 8-16 Go : 1.5b (quick) + 3b (default/deep).
+elif [ "$RAM_GB" -lt 12 ]; then
+    # 8-12 Go : 1.5b (quick) + 3b (default/deep).
     hf_download "$REPO_Q15" "$FILE_Q15" "$MODELS_DIR/$FILE_Q15"
     hf_download "$REPO_Q3"  "$FILE_Q3"  "$MODELS_DIR/$FILE_Q3"
     M_QUICK="$FILE_Q15"; M_DEFAULT="$FILE_Q3"; M_DEEP="$FILE_Q3"
     CTX_QUICK=4096; CTX_DEFAULT=8192; CTX_DEEP=8192
 else
-    # 16 Go+ : les trois tiers.
+    # 12 Go+ : les trois tiers (7b Q4_K_M ~4.7 Go tient en RAM avec de la marge).
+    # Le 7B est scinde en shards : on telecharge tout et on pointe sur le 1er.
     hf_download "$REPO_Q15" "$FILE_Q15" "$MODELS_DIR/$FILE_Q15"
     hf_download "$REPO_Q3"  "$FILE_Q3"  "$MODELS_DIR/$FILE_Q3"
-    hf_download "$REPO_Q7"  "$FILE_Q7"  "$MODELS_DIR/$FILE_Q7"
-    M_QUICK="$FILE_Q15"; M_DEFAULT="$FILE_Q3"; M_DEEP="$FILE_Q7"
+    Q7_MAIN="$(hf_download_q4km "$REPO_Q7" "$MODELS_DIR")"
+    M_QUICK="$FILE_Q15"; M_DEFAULT="$FILE_Q3"; M_DEEP="$Q7_MAIN"
     CTX_QUICK=4096; CTX_DEFAULT=8192; CTX_DEEP=8192
 fi
 
@@ -349,21 +372,27 @@ set_env "LLM_MODEL_DEEP"        "rag-deep"
 set_env "LLM_EMBED_MODEL"       "rag-embed"
 # Le 1er appel apres un swap charge le modele (30-120 s sur CPU) : timeout large.
 set_env "LLM_FIRST_CALL_TIMEOUT" "180"
-# OLLAMA_HOST est conserve tel quel pour permettre le rollback.
 log_ok "config.env mis a jour (LLM_API_BASE + mapping des tiers)."
 
-# Arret et desactivation d'Ollama (NON desinstalle automatiquement).
+# Arret ET desinstallation complete d'Ollama : le backend est desormais
+# llama-swap, Ollama n'a plus de raison d'etre.
 if systemctl list-unit-files 2>/dev/null | grep -q '^ollama'; then
-    systemctl disable --now ollama 2>/dev/null || warn "Impossible de desactiver le service ollama."
-    log_ok "Service ollama stoppe et desactive."
+    systemctl disable --now ollama 2>/dev/null || true
 fi
-# Robustesse : Ollama peut tourner SANS unite systemd (ex. 'ollama serve' lance
-# a la main). On termine tout process residuel qui tiendrait encore le port.
-if pgrep -f 'ollama serve' >/dev/null 2>&1 || pgrep -x ollama >/dev/null 2>&1; then
-    pkill -f 'ollama serve' 2>/dev/null || true
-    pkill -x ollama 2>/dev/null || true
-    log_ok "Process Ollama residuels termines."
-fi
+# Ollama peut aussi tourner sans unite systemd (ex. 'ollama serve' manuel).
+pkill -f 'ollama serve' 2>/dev/null || true
+pkill -x ollama 2>/dev/null || true
+# Suppression des binaires, bibliotheques, modeles et utilisateur/groupe Ollama.
+rm -f /usr/local/bin/ollama /usr/bin/ollama 2>/dev/null || true
+rm -rf /usr/local/lib/ollama /usr/share/ollama /root/.ollama 2>/dev/null || true
+rm -f /etc/systemd/system/ollama.service /etc/systemd/system/*/ollama.service 2>/dev/null || true
+systemctl daemon-reload 2>/dev/null || true
+id ollama >/dev/null 2>&1 && userdel ollama 2>/dev/null || true
+getent group ollama >/dev/null 2>&1 && groupdel ollama 2>/dev/null || true
+log_ok "Ollama arrete et desinstalle."
+# On stoppe d'abord une eventuelle instance existante du service pour liberer le
+# port (les relances doivent repartir sur la config regeneree).
+systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 # Le port 11434 doit etre libre avant de demarrer llama-swap.
 for _ in $(seq 1 10); do
     ss -ltn 2>/dev/null | grep -q '127.0.0.1:11434' || break
@@ -373,8 +402,10 @@ if ss -ltn 2>/dev/null | grep -q '127.0.0.1:11434'; then
     warn "Le port 11434 est encore occupe — llama-swap risque de ne pas demarrer (ss -ltnp | grep 11434)."
 fi
 
-# Demarrage du nouveau backend.
-systemctl enable --now "$SERVICE_NAME"
+# Demarrage du backend. On utilise restart (pas 'enable --now') pour que la
+# config regeneree soit bien prise en compte meme si le service tournait deja.
+systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
+systemctl restart "$SERVICE_NAME"
 
 # ============================================================================
 # Phase F - Verification
@@ -407,27 +438,6 @@ if [ "$OK" != true ]; then
 fi
 
 # ============================================================================
-# Desinstallation optionnelle d'Ollama (interactive, defaut Non)
-# ============================================================================
-if command -v ollama >/dev/null 2>&1; then
-    echo ""
-    read -r -p "Desinstaller completement Ollama et ses modeles ? [o/N] " REP || REP="N"
-    case "$REP" in
-        [oO]|[oO][uU][iI])
-            rm -f /usr/local/bin/ollama /usr/bin/ollama 2>/dev/null || true
-            rm -rf /usr/share/ollama 2>/dev/null || true
-            rm -f /etc/systemd/system/ollama.service 2>/dev/null || true
-            systemctl daemon-reload
-            warn "Ollama desinstalle. Le rollback ne pourra pas reactiver Ollama sans reinstallation."
-            log_ok "Ollama desinstalle."
-            ;;
-        *)
-            log_info "Ollama conserve (stoppe/desactive). rollback-llama-swap.sh pourra le reactiver."
-            ;;
-    esac
-fi
-
-# ============================================================================
 # Recapitulatif
 # ============================================================================
 echo ""
@@ -437,7 +447,6 @@ echo "  Backend      : llama-swap + llama-server (${LISTEN_ADDR})"
 echo "  Modeles      : $MODELS_DIR"
 echo "  Config YAML  : $YAML_PATH"
 echo "  Service      : systemctl status ${SERVICE_NAME}"
-echo "  Rollback     : bash rollback-llama-swap.sh"
 if [ "${#WARNINGS[@]}" -gt 0 ]; then
     echo ""
     log_warn "Avertissements (${#WARNINGS[@]}) :"

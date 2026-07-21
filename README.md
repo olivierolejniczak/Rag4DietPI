@@ -228,7 +228,6 @@ RESPONSE_CACHE_ENABLED=true
 |--------|-------------|
 | `setup-rag-core.sh` | Install core dependencies (Docker, Qdrant, Ollama, SearXNG) |
 | `setup-rag-llm-backend.sh` | Migrate LLM backend from Ollama to llama-swap + llama.cpp |
-| `rollback-llama-swap.sh` | Revert the LLM backend migration (re-enable Ollama) |
 | `setup-rag-ingest.sh` | Create document ingestion pipeline |
 | `setup-rag-query.sh` | Create query processing pipeline |
 | `setup-rag-backup.sh` | Backup and restore utilities |
@@ -290,9 +289,8 @@ journalctl -u rag-llm.service -n 50
 # Is the proxy up and which models are exposed?
 curl -sf http://127.0.0.1:11434/v1/models | python3 -m json.tool
 
-# Re-run the backend setup (idempotent) or roll back to Ollama
+# Re-run the backend setup (idempotent)
 sudo bash setup-rag-llm-backend.sh
-sudo bash rollback-llama-swap.sh
 
 # Check disk space (GGUF models live in /var/lib/rag-llm/models)
 df -h

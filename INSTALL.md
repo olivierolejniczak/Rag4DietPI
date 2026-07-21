@@ -47,8 +47,8 @@ sudo bash setup-rag-backup.sh
 ```
 
 > The LLM backend migration downloads the GGUF models sized to your RAM, builds
-> `llama-server`, installs the `rag-llm.service`, then stops and disables Ollama.
-> To revert: `sudo bash rollback-llama-swap.sh`.
+> `llama-server`, installs the `rag-llm.service`, then uninstalls Ollama. A
+> `config.env.pre-llamaswap.bak` backup is kept.
 
 ### 3. Verify Installation
 

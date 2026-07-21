@@ -24,8 +24,8 @@ This project evolved through multiple development iterations, consolidating into
   backoff and a first-call load timeout; embedding fallback uses `/v1/embeddings`.
   FastEmbed remains the primary embedding source (`bge-base-en-v1.5`, 768-d), so
   **no re-ingest is required**; `rag-embed` (bge-base GGUF) is a matching fallback.
-- **New `rollback-llama-swap.sh`**: re-enables Ollama and restores
-  `config.env` from `config.env.pre-llamaswap.bak`.
+- Ollama is fully uninstalled by the migration (binary, models, service, user).
+  A `config.env.pre-llamaswap.bak` is kept for safety.
 - `status.sh` / `monitor.sh` now report the llama-swap backend.
 
 ---
