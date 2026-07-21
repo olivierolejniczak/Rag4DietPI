@@ -6,6 +6,34 @@ This project evolved through multiple development iterations, consolidating into
 
 ---
 
+## Unreleased
+
+### LLM Backend: Ollama → llama-swap + llama.cpp
+
+- **New `setup-rag-llm-backend.sh`**: installs [llama-swap](https://github.com/mostlygeek/llama-swap)
+  (hot-swap proxy, static Go binary) and `llama-server` (llama.cpp, compiled with
+  `-DGGML_NATIVE=ON` for local CPU optimizations), downloads RAM-sized Qwen2.5
+  GGUF models (checksum-verified), generates `llama-swap.yaml` and the hardened
+  `rag-llm.service`, then stops/disables Ollama. OpenAI-compatible API reuses
+  port `:11434`.
+- **Per-tier model hot-swap**: `quick`/`default`/`deep` now map to distinct models
+  (`rag-quick`/`rag-default`/`rag-deep`), driven by `config.env`
+  (`LLM_API_BASE`, `LLM_MODEL_QUICK/DEFAULT/DEEP`, `LLM_EMBED_MODEL`,
+  `LLM_FIRST_CALL_TIMEOUT`). `--ultrafast`→quick, `--full`→deep.
+- **Pipeline**: `lib/llm_helper.py` now calls `/v1/chat/completions` with retry/
+  backoff and a first-call load timeout; embedding fallback uses `/v1/embeddings`.
+  FastEmbed remains the primary embedding source (`bge-base-en-v1.5`, 768-d), so
+  **no re-ingest is required**; `rag-embed` (bge-base GGUF) is a matching fallback.
+- Ollama is fully uninstalled by the migration (binary, models, service, user).
+  A `config.env.pre-llamaswap.bak` is kept for safety.
+- `status.sh` / `monitor.sh` now report the llama-swap backend.
+- Removed the unused `dual_cache.py` (the "2-layer" Qdrant/response cache was never
+  wired into the pipeline). Caching is query-level (`lib/query_cache.py` →
+  `cache/queries`); `monitor.sh`, `cache-stats.sh`, and `clear-cache.sh` now
+  target that cache (the latter previously cleared the wrong, empty dirs).
+
+---
+
 ## Current Release
 
 ### Features

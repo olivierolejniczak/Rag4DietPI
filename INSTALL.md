@@ -36,14 +36,19 @@ sudo dietpi-software
 cd /home/dietpi
 mkdir rag-system && cd rag-system
 
-# Copy setup scripts here, then run:
-sudo bash setup-rag-core.sh
+# Copy setup scripts here, then run (in this order):
+sudo bash setup-rag-core.sh          # base deps (Docker, Qdrant, SearXNG, Ollama)
+sudo bash setup-rag-llm-backend.sh   # migrate LLM backend to llama-swap + llama.cpp
 sudo bash setup-rag-ingest.sh
 sudo bash setup-rag-query.sh
 
 # Optional: Backup utilities
 sudo bash setup-rag-backup.sh
 ```
+
+> The LLM backend migration downloads the GGUF models sized to your RAM, builds
+> `llama-server`, installs the `rag-llm.service`, then uninstalls Ollama. A
+> `config.env.pre-llamaswap.bak` backup is kept.
 
 ### 3. Verify Installation
 
@@ -93,10 +98,11 @@ export BACKUP_DIR=/opt/rag-data/backups
 
 ```bash
 cd /opt
-sudo git clone https://github.com/yourusername/rag-system.git
-cd rag-system
+sudo git clone https://github.com/olivierolejniczak/Rag4DietPI.git
+cd Rag4DietPI
 
 sudo bash setup-rag-core.sh
+sudo bash setup-rag-llm-backend.sh
 sudo bash setup-rag-ingest.sh
 sudo bash setup-rag-query.sh
 ```
@@ -196,31 +202,12 @@ nano config.env
 
 ### 4. Set Up Auto-Start (Optional)
 
-Create a systemd service for Ollama (if not already configured):
+`setup-rag-llm-backend.sh` installs and enables the `rag-llm.service` systemd unit
+(llama-swap + llama.cpp), which starts automatically on boot. No manual Ollama
+service is needed — the migration disables Ollama.
 
 ```bash
-sudo nano /etc/systemd/system/ollama.service
-```
-
-```ini
-[Unit]
-Description=Ollama LLM Server
-After=network.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=/usr/local/bin/ollama serve
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl enable ollama
-sudo systemctl start ollama
+sudo systemctl status rag-llm.service
 ```
 
 ### 5. Set Up Scheduled Backups (Optional)
@@ -252,7 +239,7 @@ Batch Size: 64 | Embedding: BAAI/bge-base-en-v1.5
 === Services ===
 Docker: OK
 Qdrant: OK (0 points)
-Ollama: OK (qwen2.5:3b)
+LLM backend (llama-swap): OK
 SearXNG: OK
 
 === Python Components ===

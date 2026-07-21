@@ -71,7 +71,7 @@ For non-DietPi systems, simply:
 - **Adaptive Models**: Embedding model selection based on RAM
 - **Qdrant Low-Memory Mode**: Disk-based storage for systems <8GB RAM
 - **Tiered Performance**: Quick/Default/Deep query modes
-- **2-Layer Caching**: Search results + LLM response caching
+- **Query Caching**: Query-level response cache with TTL
 
 ## Quick Start
 
@@ -86,11 +86,12 @@ For non-DietPi systems, simply:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/rag-system.git
-cd rag-system
+git clone https://github.com/olivierolejniczak/Rag4DietPI.git
+cd Rag4DietPI
 
 # Run setup scripts (as root or with sudo)
-sudo bash setup-rag-core.sh
+sudo bash setup-rag-core.sh          # base deps (Docker, Qdrant, SearXNG, Ollama)
+sudo bash setup-rag-llm-backend.sh   # migrate LLM backend to llama-swap + llama.cpp
 sudo bash setup-rag-ingest.sh
 sudo bash setup-rag-query.sh
 
@@ -160,8 +161,8 @@ sudo bash setup-rag-query.sh
 │                      RAG System                              │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
-│  │   Ollama    │  │   Qdrant    │  │      SearXNG        │ │
-│  │  (LLM)      │  │ (Vectors)   │  │   (Web Search)      │ │
+│  │ llama-swap  │  │   Qdrant    │  │      SearXNG        │ │
+│  │ +llama.cpp  │  │ (Vectors)   │  │   (Web Search)      │ │
 │  │  :11434     │  │  :6333      │  │      :8085          │ │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘ │
 ├─────────────────────────────────────────────────────────────┤
@@ -179,6 +180,22 @@ sudo bash setup-rag-query.sh
 │  └─────────────┘  └─────────────┘  └─────────────────────┘ │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+**LLM backend — llama-swap + llama.cpp.** The system talks to an OpenAI-compatible
+API on `:11434` served by [llama-swap](https://github.com/mostlygeek/llama-swap),
+which hot-swaps `llama-server` (llama.cpp) instances on demand. The three query
+tiers map to three models, loaded only when used and unloaded after a TTL:
+
+| Tier (`--mode`) | llama-swap model | GGUF (Q4_K_M) |
+|-----------------|------------------|---------------|
+| `quick` / `--ultrafast` | `rag-quick`   | qwen2.5-1.5b-instruct |
+| `default`               | `rag-default` | qwen2.5-3b-instruct   |
+| `deep` / `--full`       | `rag-deep`    | qwen2.5-7b-instruct   |
+
+Which models are downloaded depends on detected RAM (4GB → 1.5b only; 8GB → +3b;
+16GB+ → +7b). Embeddings use FastEmbed (`bge-base-en-v1.5`, 768-d) as the primary
+source; llama-swap serves a matching `bge-base` GGUF (`rag-embed`) only as a
+fallback, so the vector space stays consistent and no re-ingest is needed.
 
 ## Configuration
 
@@ -201,8 +218,8 @@ CRAG_ENABLED=false
 REFLECTION_ENABLED=true
 
 # Cache
-QDRANT_CACHE_ENABLED=true
-RESPONSE_CACHE_ENABLED=true
+QUERY_CACHE_ENABLED=true
+QUERY_CACHE_TTL=3600
 ```
 
 ## Scripts Reference
@@ -210,6 +227,7 @@ RESPONSE_CACHE_ENABLED=true
 | Script | Description |
 |--------|-------------|
 | `setup-rag-core.sh` | Install core dependencies (Docker, Qdrant, Ollama, SearXNG) |
+| `setup-rag-llm-backend.sh` | Migrate LLM backend from Ollama to llama-swap + llama.cpp |
 | `setup-rag-ingest.sh` | Create document ingestion pipeline |
 | `setup-rag-query.sh` | Create query processing pipeline |
 | `setup-rag-backup.sh` | Backup and restore utilities |
@@ -262,13 +280,19 @@ docker logs qdrant
 sudo chmod 777 /mnt/dietpi_userdata/qdrant
 ```
 
-### Ollama Model Download Fails
+### LLM backend (llama-swap) not responding
 
 ```bash
-# Manual download with progress
-ollama pull qwen2.5:3b
+# Service logs
+journalctl -u rag-llm.service -n 50
 
-# Check disk space
+# Is the proxy up and which models are exposed?
+curl -sf http://127.0.0.1:11434/v1/models | python3 -m json.tool
+
+# Re-run the backend setup (idempotent)
+sudo bash setup-rag-llm-backend.sh
+
+# Check disk space (GGUF models live in /var/lib/rag-llm/models)
 df -h
 ```
 
@@ -286,7 +310,8 @@ MIT License - See [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 
-- [Ollama](https://ollama.com/) - Local LLM inference
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) - Local LLM inference (CPU)
+- [llama-swap](https://github.com/mostlygeek/llama-swap) - On-demand model hot-swap proxy
 - [Qdrant](https://qdrant.tech/) - Vector database
 - [FastEmbed](https://github.com/qdrant/fastembed) - Fast embeddings
 - [Unstructured.io](https://unstructured.io/) - Document parsing

@@ -71,16 +71,33 @@ CPU_COUNT=$(nproc)
 
 # profiling: CPU Score Profiling
 # Calculate CPU score based on cores and frequency
-CPU_MHZ=$(lscpu 2>/dev/null | awk -F': +' '/CPU max MHz/{print $2}' | cut -d'.' -f1)
-if [ -z "$CPU_MHZ" ] || [ "$CPU_MHZ" = "0" ]; then
-    # Fallback: try current MHz
-    CPU_MHZ=$(lscpu 2>/dev/null | awk -F': +' '/CPU MHz/{print $2}' | cut -d'.' -f1)
+# LC_ALL=C : force le point decimal (sinon fr_FR donne "4700,0000" et la virgule
+# casse l'arithmetique bash). sed 's/[.,].*//' garde la partie entiere quel que
+# soit le separateur.
+# Override manuel via CPU_MHZ_OVERRIDE pour les environnements ou lscpu n'expose
+# pas de frequence numerique exploitable (certaines VM, ARM, valeurs en plage...).
+if [ -n "${CPU_MHZ_OVERRIDE:-}" ]; then
+    CPU_MHZ="$CPU_MHZ_OVERRIDE"
+    log_info "Frequence CPU forcee via CPU_MHZ_OVERRIDE=${CPU_MHZ} MHz"
+else
+    CPU_MHZ=$(LC_ALL=C lscpu 2>/dev/null | awk -F': +' '/CPU max MHz/{print $2}' | sed 's/[.,].*//')
+    if [ -z "$CPU_MHZ" ] || [ "$CPU_MHZ" = "0" ]; then
+        # Fallback: try current MHz
+        CPU_MHZ=$(LC_ALL=C lscpu 2>/dev/null | awk -F': +' '/CPU MHz/{print $2}' | sed 's/[.,].*//')
+    fi
+    if [ -z "$CPU_MHZ" ] || [ "$CPU_MHZ" = "0" ]; then
+        # Last resort: read from cpuinfo
+        CPU_MHZ=$(awk '/cpu MHz/{print $4; exit}' /proc/cpuinfo | sed 's/[.,].*//')
+    fi
 fi
-if [ -z "$CPU_MHZ" ] || [ "$CPU_MHZ" = "0" ]; then
-    # Last resort: read from cpuinfo
-    CPU_MHZ=$(cat /proc/cpuinfo | grep "cpu MHz" | head -1 | awk '{print $4}' | cut -d'.' -f1)
-fi
-[ -z "$CPU_MHZ" ] && CPU_MHZ=1000  # Default fallback
+# Validation : uniquement des chiffres. Sinon repli EXPLICITE (signale) a 1000 MHz,
+# ce qui minore CPU_SCORE (selection de modele/timeouts plus prudents).
+case "$CPU_MHZ" in
+    ''|*[!0-9]*)
+        log_warn "Detection frequence CPU echouee (valeur: '${CPU_MHZ:-vide}') — repli sur 1000 MHz. Surchargez via CPU_MHZ_OVERRIDE=<MHz>."
+        CPU_MHZ=1000
+        ;;
+esac
 
 CPU_SCORE=$((CPU_COUNT * CPU_MHZ / 1000))
 
@@ -699,18 +716,10 @@ NUM_PREDICT_DEEP=2000
 QUERY_MODE_DEFAULT=default
 
 # ============================================================================
-# 2-LAYER CACHING SYSTEM (cache)
+# QUERY CACHE (cache)
 # ============================================================================
-
-# Layer 1: Qdrant Search Results Cache (volatile)
-QDRANT_CACHE_ENABLED=true
-QDRANT_CACHE_DIR=./cache/qdrant
-QDRANT_CACHE_TTL=3600
-
-# Layer 2: LLM Response Cache (persistent)
-RESPONSE_CACHE_ENABLED=true
-RESPONSE_CACHE_DIR=./cache/responses
-RESPONSE_CACHE_TTL=86400
+# La mise en cache se fait au niveau requete : lib/query_cache.py -> ./cache/queries
+# (voir QUERY_CACHE_ENABLED / QUERY_CACHE_TTL plus bas).
 
 # Cache debug output
 CACHE_DEBUG=false
@@ -845,7 +854,7 @@ log_ok "config.env created"
 # Create status.sh
 cat > "$PROJECT_DIR/status.sh" << 'EOFSTATUS'
 #!/bin/bash
-source ./config.env 2>/dev/null || true
+set -a; source ./config.env 2>/dev/null || true; set +a
 
 G='\033[1;32m'; R='\033[1;31m'; Y='\033[1;33m'; B='\033[1;34m'; C='\033[1;36m'; M='\033[1;35m'; N='\033[0m'
 
@@ -873,8 +882,8 @@ else
     echo -e "${R}NOT running${N}"
 fi
 
-echo -n "Ollama: "
-curl -s --max-time 2 "${OLLAMA_HOST:-http://localhost:11434}/api/tags" > /dev/null 2>&1 && echo -e "${G}OK${N} (${LLM_MODEL})" || echo -e "${R}NOT running${N}"
+echo -n "LLM backend (llama-swap): "
+curl -sf --max-time 2 "${LLM_API_BASE:-http://127.0.0.1:11434/v1}/models" > /dev/null 2>&1 && echo -e "${G}OK${N}" || echo -e "${R}NOT running${N}"
 
 echo -n "SearXNG: "
 curl -s --max-time 2 "${SEARXNG_URL:-http://localhost:8085/search}?q=test&format=json" 2>/dev/null | grep -q '"results"' && echo -e "${G}OK${N}" || echo -e "${Y}Limited${N}"
@@ -926,7 +935,7 @@ cat > "$PROJECT_DIR/evaluate.sh" << 'EOFEVAL'
 #   ./evaluate.sh --report                        # Run batch evaluation
 
 cd "$(dirname "$0")"
-source ./config.env 2>/dev/null || true
+set -a; source ./config.env 2>/dev/null || true; set +a
 
 # Colors
 G='\033[1;32m'; R='\033[1;31m'; Y='\033[1;33m'; B='\033[1;34m'; N='\033[0m'
@@ -1123,7 +1132,7 @@ BLUE='\033[1;34m'
 NC='\033[0m'
 
 # Configuration
-source ./config.env 2>/dev/null || true
+set -a; source ./config.env 2>/dev/null || true; set +a
 REFRESH_INTERVAL=${1:-5}
 
 while true; do
@@ -1152,12 +1161,14 @@ while true; do
     echo -e "  ${RED}✗${NC} Qdrant: Not responding"
   fi
   
-  # Ollama
-  OLLAMA_STATUS=$(curl -s --max-time 2 "${OLLAMA_HOST:-http://localhost:11434}/api/tags" 2>/dev/null)
-  if [ -n "$OLLAMA_STATUS" ]; then
-    echo -e "  ${GREEN}✓${NC} Ollama: Running (${LLM_MODEL:-unknown})"
+  # Backend LLM (llama-swap)
+  _LLM_BASE="${LLM_API_BASE:-http://127.0.0.1:11434/v1}"
+  LLM_STATUS=$(curl -sf --max-time 2 "${_LLM_BASE}/models" 2>/dev/null)
+  if [ -n "$LLM_STATUS" ]; then
+    LOADED=$(curl -sf --max-time 2 "${_LLM_BASE%/v1}/running" 2>/dev/null | python3 -c 'import sys,json;d=json.load(sys.stdin);print(",".join(m.get("model","") for m in d.get("running",[])) or "idle")' 2>/dev/null || echo "?")
+    echo -e "  ${GREEN}✓${NC} LLM backend (llama-swap): Running [modele: ${LOADED:-idle}]"
   else
-    echo -e "  ${RED}✗${NC} Ollama: Not responding"
+    echo -e "  ${RED}✗${NC} LLM backend (llama-swap): Not responding"
   fi
   
   # SearXNG
@@ -1190,16 +1201,13 @@ while true; do
   
   # ========== Cache Status ==========
   echo -e "${BLUE}▌ Cache Status${NC}"
-  # Qdrant cache
-  if [ -d "${QDRANT_CACHE_DIR:-./cache/qdrant}" ]; then
-    QDRANT_CACHE=$(find "${QDRANT_CACHE_DIR:-./cache/qdrant}" -name "*.json" -type f 2>/dev/null | wc -l)
-    echo "  Qdrant cache: $QDRANT_CACHE queries"
-  fi
-  
-  # Response cache
-  if [ -d "${RESPONSE_CACHE_DIR:-./cache/responses}" ]; then
-    RESPONSE_CACHE=$(find "${RESPONSE_CACHE_DIR:-./cache/responses}" -name "*.txt" -type f 2>/dev/null | wc -l)
-    echo "  Response cache: $RESPONSE_CACHE entries"
+  # Query cache used by the pipeline (lib/query_cache.py -> $CACHE_DIR/queries).
+  QUERY_CACHE_D="${CACHE_DIR:-./cache}/queries"
+  if [ -d "$QUERY_CACHE_D" ]; then
+    QUERY_CACHE=$(find "$QUERY_CACHE_D" -name "*.json" -type f 2>/dev/null | wc -l)
+    echo "  Query cache: $QUERY_CACHE entries"
+  else
+    echo "  Query cache: 0 entries"
   fi
   
   # Memory
@@ -1234,7 +1242,7 @@ log_ok "monitor.sh created (cache)"
 cat > "$PROJECT_DIR/cache-stats.sh" << 'EOFCACHE'
 #!/bin/bash
 # Cache Statistics Viewer cache
-source ./config.env 2>/dev/null || true
+set -a; source ./config.env 2>/dev/null || true; set +a
 
 # Colors
 GREEN='\033[1;32m'
@@ -1248,47 +1256,15 @@ echo -e "${CYAN}  Cache Statistics - $(date '+%H:%M:%S')${NC}"
 echo -e "${CYAN}════════════════════════════════════════${NC}"
 echo ""
 
-# ========== Qdrant Cache ==========
-if [ -d "${QDRANT_CACHE_DIR:-./cache/qdrant}" ]; then
-  echo -e "${GREEN}Qdrant Search Cache:${NC}"
-  
-  QDRANT_FILES=$(find "${QDRANT_CACHE_DIR:-./cache/qdrant}" -name "*.json" -type f 2>/dev/null | wc -l)
-  QDRANT_SIZE=$(du -sh "${QDRANT_CACHE_DIR:-./cache/qdrant}" 2>/dev/null | cut -f1 || echo "0")
-  
-  echo "  Files: $QDRANT_FILES"
-  
-  if [ $QDRANT_FILES -gt 0 ]; then
-    OLDEST_FILE=$(find "${QDRANT_CACHE_DIR:-./cache/qdrant}" -name "*.json" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | head -1 | cut -d' ' -f2)
-    if [ -n "$OLDEST_FILE" ] && [ -f "$OLDEST_FILE" ]; then
-      OLDEST_AGE=$(( $(date +%s) - $(stat -c%Y "$OLDEST_FILE" 2>/dev/null || echo "0") ))
-      echo "  Oldest: $((OLDEST_AGE / 3600))h ago"
-    fi
-  fi
-  
-  echo "  Size: $QDRANT_SIZE"
-  echo "  TTL: ${QDRANT_CACHE_TTL:-3600}s"
-  echo ""
-fi
-
-# ========== Response Cache ==========
-if [ -d "${RESPONSE_CACHE_DIR:-./cache/responses}" ]; then
-  echo -e "${GREEN}LLM Response Cache:${NC}"
-  
-  RESPONSE_FILES=$(find "${RESPONSE_CACHE_DIR:-./cache/responses}" -name "*.txt" -type f 2>/dev/null | wc -l)
-  RESPONSE_SIZE=$(du -sh "${RESPONSE_CACHE_DIR:-./cache/responses}" 2>/dev/null | cut -f1 || echo "0")
-  
-  echo "  Files: $RESPONSE_FILES"
-  
-  if [ $RESPONSE_FILES -gt 0 ]; then
-    OLDEST_FILE=$(find "${RESPONSE_CACHE_DIR:-./cache/responses}" -name "*.txt" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | head -1 | cut -d' ' -f2)
-    if [ -n "$OLDEST_FILE" ] && [ -f "$OLDEST_FILE" ]; then
-      OLDEST_AGE=$(( $(date +%s) - $(stat -c%Y "$OLDEST_FILE" 2>/dev/null || echo "0") ))
-      echo "  Oldest: $((OLDEST_AGE / 3600))h ago"
-    fi
-  fi
-  
-  echo "  Size: $RESPONSE_SIZE"
-  echo "  TTL: ${RESPONSE_CACHE_TTL:-86400}s"
+# ========== Query Cache (the layer actually used by the pipeline) ==========
+QUERY_CACHE_D="${CACHE_DIR:-./cache}/queries"
+if [ -d "$QUERY_CACHE_D" ]; then
+  echo -e "${GREEN}Query Cache:${NC}"
+  QUERY_FILES=$(find "$QUERY_CACHE_D" -name "*.json" -type f 2>/dev/null | wc -l)
+  QUERY_SIZE=$(du -sh "$QUERY_CACHE_D" 2>/dev/null | cut -f1 || echo "0")
+  echo "  Files: $QUERY_FILES"
+  echo "  Size: $QUERY_SIZE"
+  echo "  TTL: ${QUERY_CACHE_TTL:-3600}s"
   echo ""
 fi
 
@@ -1332,20 +1308,15 @@ log_ok "cache-stats.sh created (cache)"
 cat > "$PROJECT_DIR/clear-cache.sh" << 'EOFCLEAR'
 #!/bin/bash
 # Clear Cache Utility cache
-source ./config.env 2>/dev/null || true
+set -a; source ./config.env 2>/dev/null || true; set +a
 
 echo "Clearing query caches..."
 
-# Clear Qdrant cache
-if [ -d "${QDRANT_CACHE_DIR:-./cache/qdrant}" ]; then
-  rm -f "${QDRANT_CACHE_DIR:-./cache/qdrant}"/*.json 2>/dev/null
-  echo "[OK] Qdrant cache cleared"
-fi
-
-# Clear Response cache
-if [ -d "${RESPONSE_CACHE_DIR:-./cache/responses}" ]; then
-  rm -f "${RESPONSE_CACHE_DIR:-./cache/responses}"/*.txt 2>/dev/null
-  echo "[OK] Response cache cleared"
+# Clear query cache (lib/query_cache.py -> ./cache/queries)
+QUERY_CACHE_D="${CACHE_DIR:-./cache}/queries"
+if [ -d "$QUERY_CACHE_D" ]; then
+  rm -f "$QUERY_CACHE_D"/*.json 2>/dev/null
+  echo "[OK] Query cache cleared"
 fi
 
 # Clear conversation memory
@@ -1355,8 +1326,7 @@ if [ -f "${MEMORY_FILE:-./cache/memory.json}" ]; then
 fi
 
 # Recreate directories
-mkdir -p "${QDRANT_CACHE_DIR:-./cache/qdrant}"
-mkdir -p "${RESPONSE_CACHE_DIR:-./cache/responses}"
+mkdir -p "$QUERY_CACHE_D"
 
 echo ""
 echo "Cache cleared successfully"
@@ -1414,7 +1384,7 @@ echo "  - French OCR, legacy .doc support"
 echo "  - Qdrant low-memory tuning"
 echo ""
 echo "cache Features (preserved):"
-echo "  - Tiered performance, 2-layer cache, monitoring"
+echo "  - Tiered performance, query cache, monitoring"
 echo ""
 echo "Next steps:"
 echo "  bash setup-rag-ingest-System.sh"

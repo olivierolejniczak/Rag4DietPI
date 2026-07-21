@@ -23,7 +23,7 @@ echo ""
 mkdir -p "$PROJECT_DIR"/{lib,cache,documents,.ingest_tracking}
 cd "$PROJECT_DIR"
 
-[ -f "./config.env" ] && source ./config.env
+[ -f "./config.env" ] && { set -a; source ./config.env; set +a; }
 
 log_info "Creating unstructured_parser.py..."
 cat > "$PROJECT_DIR/lib/unstructured_parser.py" << 'EOFPY'
@@ -3740,7 +3740,7 @@ cat > "$PROJECT_DIR/ingest.sh" << 'EOFINGEST'
 # Features: File ingestion + Website crawling
 
 cd "$(dirname "$0")"
-source ./config.env 2>/dev/null || true
+set -a; source ./config.env 2>/dev/null || true; set +a
 
 # Headless mode
 export OPENCV_LOG_LEVEL=ERROR
@@ -3833,7 +3833,7 @@ echo "Creating utility scripts..."
 cat > "$PROJECT_DIR/clear-collection.sh" << 'EOFSH'
 #!/bin/bash
 cd "$(dirname "$0")"
-source ./config.env 2>/dev/null || true
+set -a; source ./config.env 2>/dev/null || true; set +a
 
 QDRANT_HOST="${QDRANT_HOST:-http://localhost:6333}"
 COLLECTION="${COLLECTION_NAME:-documents}"
