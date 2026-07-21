@@ -5770,6 +5770,67 @@ fi
 echo ""
 
 # ----------------------------------------------------------------------------
+# 7b. LLM Generation & Tier Routing (real inference, not just retrieval)
+# ----------------------------------------------------------------------------
+echo -e "${BLUE}=== 7b. LLM Generation & Tier Routing ===${NC}"
+
+LLM_API="${LLM_API_BASE:-http://127.0.0.1:11434/v1}"
+
+# Each tier must actually GENERATE text (deterministic instruction-following),
+# whatever GGUF backs it on this hardware profile. This exercises the llama-swap
+# hot-swap path directly via the OpenAI-compatible API.
+run_test "LLM gen: rag-quick tier generates" \
+    "curl -s ${LLM_API}/chat/completions -H 'Content-Type: application/json' -d '{\"model\":\"rag-quick\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with only the single word BANANA.\"}],\"max_tokens\":8,\"temperature\":0}'" \
+    "BANANA" \
+    180
+
+run_test "LLM gen: rag-default tier generates" \
+    "curl -s ${LLM_API}/chat/completions -H 'Content-Type: application/json' -d '{\"model\":\"rag-default\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with only the single word ORANGE.\"}],\"max_tokens\":8,\"temperature\":0}'" \
+    "ORANGE" \
+    240
+
+if [ "$QUICK_MODE" = true ]; then
+    log_skip "LLM gen: rag-deep tier (--quick)"
+    TESTS_SKIPPED=$((TESTS_SKIPPED + 1))
+else
+    run_test "LLM gen: rag-deep tier generates" \
+        "curl -s ${LLM_API}/chat/completions -H 'Content-Type: application/json' -d '{\"model\":\"rag-deep\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with only the single word CHERRY.\"}],\"max_tokens\":8,\"temperature\":0}'" \
+        "CHERRY" \
+        300
+fi
+
+# Grounded answers through the full RAG+LLM pipeline: the model must state a fact
+# found only in the ingested test documents (proves generation is grounded, not
+# hallucinated, and that retrieval feeds the LLM correctly).
+run_test "LLM grounded (quick): ACME CEO name" \
+    "./query.sh --ultrafast 'Who is the CEO of ACME Corporation?'" \
+    "Dubois" \
+    180
+
+run_test "LLM grounded (default): CloudShield Business price" \
+    "./query.sh 'How much does the CloudShield Business plan cost per month?'" \
+    "2000" \
+    180
+
+if [ "$QUICK_MODE" = true ]; then
+    log_skip "LLM grounded (deep): ACME founding year (--quick)"
+    TESTS_SKIPPED=$((TESTS_SKIPPED + 1))
+else
+    run_test "LLM grounded (deep): ACME founding year" \
+        "./query.sh --full 'In what year was ACME Corporation founded?'" \
+        "2010" \
+        300
+fi
+
+# Embeddings served by the backend (rag-embed tier / FastEmbed fallback path).
+run_test "LLM embed: rag-embed returns a vector" \
+    "curl -s ${LLM_API}/embeddings -H 'Content-Type: application/json' -d '{\"model\":\"rag-embed\",\"input\":\"vector database test\"}'" \
+    "embedding" \
+    150
+
+echo ""
+
+# ----------------------------------------------------------------------------
 # 8. Web-Only Queries
 # ----------------------------------------------------------------------------
 echo -e "${BLUE}=== 8. Web-Only Queries ===${NC}"
