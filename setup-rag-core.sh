@@ -1196,16 +1196,15 @@ while true; do
   
   # ========== Cache Status ==========
   echo -e "${BLUE}▌ Cache Status${NC}"
-  # Qdrant cache
-  if [ -d "${QDRANT_CACHE_DIR:-./cache/qdrant}" ]; then
-    QDRANT_CACHE=$(find "${QDRANT_CACHE_DIR:-./cache/qdrant}" -name "*.json" -type f 2>/dev/null | wc -l)
-    echo "  Qdrant cache: $QDRANT_CACHE queries"
-  fi
-  
-  # Response cache
-  if [ -d "${RESPONSE_CACHE_DIR:-./cache/responses}" ]; then
-    RESPONSE_CACHE=$(find "${RESPONSE_CACHE_DIR:-./cache/responses}" -name "*.txt" -type f 2>/dev/null | wc -l)
-    echo "  Response cache: $RESPONSE_CACHE entries"
+  # Query cache = the layer actually used by the pipeline (lib/query_cache.py,
+  # QueryCache -> $CACHE_DIR/queries). NB: the dual_cache qdrant/response layers
+  # exist in lib/ but are not wired into query_main, so they never populate.
+  QUERY_CACHE_D="${CACHE_DIR:-./cache}/queries"
+  if [ -d "$QUERY_CACHE_D" ]; then
+    QUERY_CACHE=$(find "$QUERY_CACHE_D" -name "*.json" -type f 2>/dev/null | wc -l)
+    echo "  Query cache: $QUERY_CACHE entries"
+  else
+    echo "  Query cache: 0 entries"
   fi
   
   # Memory
@@ -1254,9 +1253,21 @@ echo -e "${CYAN}  Cache Statistics - $(date '+%H:%M:%S')${NC}"
 echo -e "${CYAN}════════════════════════════════════════${NC}"
 echo ""
 
-# ========== Qdrant Cache ==========
+# ========== Query Cache (the layer actually used by the pipeline) ==========
+QUERY_CACHE_D="${CACHE_DIR:-./cache}/queries"
+if [ -d "$QUERY_CACHE_D" ]; then
+  echo -e "${GREEN}Query Cache:${NC}"
+  QUERY_FILES=$(find "$QUERY_CACHE_D" -name "*.json" -type f 2>/dev/null | wc -l)
+  QUERY_SIZE=$(du -sh "$QUERY_CACHE_D" 2>/dev/null | cut -f1 || echo "0")
+  echo "  Files: $QUERY_FILES"
+  echo "  Size: $QUERY_SIZE"
+  echo "  TTL: ${QUERY_CACHE_TTL:-3600}s"
+  echo ""
+fi
+
+# ========== Qdrant Cache (legacy dual_cache layer — not wired into query_main) ==========
 if [ -d "${QDRANT_CACHE_DIR:-./cache/qdrant}" ]; then
-  echo -e "${GREEN}Qdrant Search Cache:${NC}"
+  echo -e "${GREEN}Qdrant Search Cache (legacy/unused):${NC}"
   
   QDRANT_FILES=$(find "${QDRANT_CACHE_DIR:-./cache/qdrant}" -name "*.json" -type f 2>/dev/null | wc -l)
   QDRANT_SIZE=$(du -sh "${QDRANT_CACHE_DIR:-./cache/qdrant}" 2>/dev/null | cut -f1 || echo "0")
@@ -1276,9 +1287,9 @@ if [ -d "${QDRANT_CACHE_DIR:-./cache/qdrant}" ]; then
   echo ""
 fi
 
-# ========== Response Cache ==========
+# ========== Response Cache (legacy dual_cache layer — not wired into query_main) ==========
 if [ -d "${RESPONSE_CACHE_DIR:-./cache/responses}" ]; then
-  echo -e "${GREEN}LLM Response Cache:${NC}"
+  echo -e "${GREEN}LLM Response Cache (legacy/unused):${NC}"
   
   RESPONSE_FILES=$(find "${RESPONSE_CACHE_DIR:-./cache/responses}" -name "*.txt" -type f 2>/dev/null | wc -l)
   RESPONSE_SIZE=$(du -sh "${RESPONSE_CACHE_DIR:-./cache/responses}" 2>/dev/null | cut -f1 || echo "0")
