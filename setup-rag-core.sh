@@ -873,8 +873,8 @@ else
     echo -e "${R}NOT running${N}"
 fi
 
-echo -n "Ollama: "
-curl -s --max-time 2 "${OLLAMA_HOST:-http://localhost:11434}/api/tags" > /dev/null 2>&1 && echo -e "${G}OK${N} (${LLM_MODEL})" || echo -e "${R}NOT running${N}"
+echo -n "LLM backend (llama-swap): "
+curl -sf --max-time 2 "${LLM_API_BASE:-http://127.0.0.1:11434/v1}/models" > /dev/null 2>&1 && echo -e "${G}OK${N}" || echo -e "${R}NOT running${N}"
 
 echo -n "SearXNG: "
 curl -s --max-time 2 "${SEARXNG_URL:-http://localhost:8085/search}?q=test&format=json" 2>/dev/null | grep -q '"results"' && echo -e "${G}OK${N}" || echo -e "${Y}Limited${N}"
@@ -1152,12 +1152,14 @@ while true; do
     echo -e "  ${RED}✗${NC} Qdrant: Not responding"
   fi
   
-  # Ollama
-  OLLAMA_STATUS=$(curl -s --max-time 2 "${OLLAMA_HOST:-http://localhost:11434}/api/tags" 2>/dev/null)
-  if [ -n "$OLLAMA_STATUS" ]; then
-    echo -e "  ${GREEN}✓${NC} Ollama: Running (${LLM_MODEL:-unknown})"
+  # Backend LLM (llama-swap)
+  _LLM_BASE="${LLM_API_BASE:-http://127.0.0.1:11434/v1}"
+  LLM_STATUS=$(curl -sf --max-time 2 "${_LLM_BASE}/models" 2>/dev/null)
+  if [ -n "$LLM_STATUS" ]; then
+    LOADED=$(curl -sf --max-time 2 "${_LLM_BASE%/v1}/running" 2>/dev/null | python3 -c 'import sys,json;d=json.load(sys.stdin);print(",".join(m.get("model","") for m in d.get("running",[])) or "idle")' 2>/dev/null || echo "?")
+    echo -e "  ${GREEN}✓${NC} LLM backend (llama-swap): Running [modele: ${LOADED:-idle}]"
   else
-    echo -e "  ${RED}✗${NC} Ollama: Not responding"
+    echo -e "  ${RED}✗${NC} LLM backend (llama-swap): Not responding"
   fi
   
   # SearXNG

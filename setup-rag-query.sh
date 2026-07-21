@@ -27,12 +27,19 @@ cd "$PROJECT_DIR"
 
 log_info "Creating llm_helper.py..."
 cat > "$PROJECT_DIR/lib/llm_helper.py" << 'EOFPY'
-"""LLM generation helper with timeout handling and debug tracking"""
+"""LLM generation helper - client HTTP OpenAI-compatible (llama-swap + llama.cpp).
+
+Le backend est llama-swap, qui expose une API OpenAI-compatible sur l'ancien
+port d'Ollama (compatibilite conservee). Le modele est choisi selon le tier
+actif (quick/default/deep) via config.env : LLM_MODEL_QUICK / _DEFAULT / _DEEP.
+Les embeddings passent en priorite par FastEmbed ; llama-swap (/v1/embeddings)
+n'est qu'un repli et doit rester dans le meme espace vectoriel (bge-base, 768-d).
+"""
 import os
 import requests
 import time
 
-# Debug tracking for LLM and embedding calls
+# Suivi de debug des appels LLM et embeddings
 _debug_info = {
     "llm_model": None,
     "llm_calls": 0,
@@ -43,11 +50,11 @@ _debug_info = {
 }
 
 def get_debug_info():
-    """Return debug info about LLM/embedding usage"""
+    """Renvoie les infos de debug sur l'usage LLM/embedding"""
     return _debug_info.copy()
 
 def reset_debug_info():
-    """Reset debug counters"""
+    """Remet a zero les compteurs de debug"""
     global _debug_info
     _debug_info = {
         "llm_model": None,
@@ -59,92 +66,115 @@ def reset_debug_info():
     }
 
 def _int_env(key, default):
-    """int() an env var, tolerating a missing/blank/invalid value."""
+    """int() d'une variable d'env, tolerant a une valeur absente/vide/invalide."""
     try:
         return int(os.environ.get(key, ""))
     except (TypeError, ValueError):
         return int(default)
 
 def _float_env(key, default):
-    """float() an env var, tolerating a missing/blank/invalid value."""
+    """float() d'une variable d'env, tolerant a une valeur absente/vide/invalide."""
     try:
         return float(os.environ.get(key, ""))
     except (TypeError, ValueError):
         return float(default)
 
+def _resolve_model():
+    """Nom du modele llama-swap selon le tier actif (pilote par config.env)."""
+    mode = os.environ.get("QUERY_MODE_ACTIVE",
+                          os.environ.get("QUERY_MODE_DEFAULT", "default"))
+    if mode in ("quick", "ultrafast", "fast"):
+        key = "LLM_MODEL_QUICK"
+    elif mode in ("deep", "research", "comprehensive"):
+        key = "LLM_MODEL_DEEP"
+    else:
+        key = "LLM_MODEL_DEFAULT"
+    # Repli sur l'ancien LLM_MODEL unique si le mapping de tier n'est pas defini.
+    return os.environ.get(key) or os.environ.get("LLM_MODEL", "rag-default")
+
 def get_config():
     return {
-        "ollama_host": os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
-        "llm_model": os.environ.get("LLM_MODEL", "qwen2.5:3b"),
-        "embedding_model": os.environ.get("EMBEDDING_MODEL", "nomic-embed-text"),
+        "api_base": os.environ.get("LLM_API_BASE", "http://127.0.0.1:11434/v1"),
+        "llm_model": _resolve_model(),
+        "embed_model": os.environ.get("LLM_EMBED_MODEL", "rag-embed"),
         "timeout_default": _int_env("LLM_TIMEOUT_OVERRIDE", _int_env("LLM_TIMEOUT_DEFAULT", 180)),
         "timeout_ultrafast": _int_env("LLM_TIMEOUT_ULTRAFAST", 90),
         "timeout_full": _int_env("LLM_TIMEOUT_FULL", 0),
+        # 1er appel apres un swap : chargement du modele (30-120 s sur CPU).
+        "first_call_timeout": _int_env("LLM_FIRST_CALL_TIMEOUT", 180),
+        "retries": _int_env("LLM_RETRIES", 2),
         "temperature": _float_env("TEMPERATURE", 0.2),
     }
 
 def llm_generate(prompt, max_tokens=500, timeout=None, temperature=None):
-    """Generate text with LLM, tracking debug info"""
+    """Genere du texte via l'API OpenAI-compatible (/v1/chat/completions)."""
     global _debug_info
     config = get_config()
-    
+
     _debug_info["llm_model"] = config["llm_model"]
     _debug_info["llm_calls"] += 1
-    
+
     if timeout is None:
         timeout = config["timeout_default"]
     if temperature is None:
         temperature = config["temperature"]
-    
-    req_timeout = None if timeout == 0 else timeout
-    
+
+    # On releve le timeout au plancher first_call_timeout pour absorber le cout
+    # de chargement du modele apres un hot-swap (sauf timeout illimite = 0).
+    if timeout == 0:
+        req_timeout = None
+    else:
+        req_timeout = max(timeout, config["first_call_timeout"])
+
+    url = config["api_base"].rstrip("/") + "/chat/completions"
+    payload = {
+        "model": config["llm_model"],
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": False,
+    }
+
     start = time.time()
-    try:
-        resp = requests.post(
-            f"{config['ollama_host']}/api/generate",
-            json={
-                "model": config["llm_model"],
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "num_predict": max_tokens,
-                    "temperature": temperature
-                }
-            },
-            timeout=req_timeout
-        )
-        elapsed = time.time() - start
-        _debug_info["llm_total_time"] += elapsed
-        
-        if resp.status_code == 200:
-            return resp.json().get("response", "").strip()
-        else:
-            return None
-    except requests.exceptions.Timeout:
-        _debug_info["llm_total_time"] += time.time() - start
-        return None
-    except Exception as e:
-        _debug_info["llm_total_time"] += time.time() - start
-        return None
+    for attempt in range(config["retries"] + 1):
+        try:
+            resp = requests.post(url, json=payload, timeout=req_timeout)
+            if resp.status_code == 200:
+                _debug_info["llm_total_time"] += time.time() - start
+                choices = resp.json().get("choices", [])
+                if choices:
+                    return (choices[0].get("message", {}).get("content") or "").strip()
+                return None
+            # 502/503 : modele en cours de chargement -> on retente avec backoff.
+            if resp.status_code in (502, 503) and attempt < config["retries"]:
+                time.sleep(2 * (attempt + 1))
+                continue
+            break
+        except requests.exceptions.Timeout:
+            break
+        except requests.exceptions.RequestException:
+            if attempt < config["retries"]:
+                time.sleep(2 * (attempt + 1))
+                continue
+            break
+    _debug_info["llm_total_time"] += time.time() - start
+    return None
 
 def llm_generate_fast(prompt, max_tokens=100):
-    """Quick generation for classification/enhancement"""
+    """Generation rapide pour classification/enrichissement."""
     config = get_config()
     timeout = min(30, config["timeout_ultrafast"])
     return llm_generate(prompt, max_tokens, timeout, temperature=0.1)
 
 def get_embedding(text, timeout=60, is_query=True):
-    """Get embedding vector - fastembed+: FastEmbed with Ollama fallback"""
+    """Vecteur d'embedding - FastEmbed prioritaire, llama-swap en repli."""
     global _debug_info
     config = get_config()
-    
+
     _debug_info["embedding_calls"] += 1
-    
     start = time.time()
-    embedding = []
-    
+
     fastembed_enabled = os.environ.get("FEATURE_FASTEMBED_ENABLED", "true") == "true"
-    
     if fastembed_enabled:
         try:
             from embedding_helper import get_embedding as fe_embed, is_fastembed_available
@@ -156,21 +186,23 @@ def get_embedding(text, timeout=60, is_query=True):
                     return embedding
         except ImportError:
             pass
-    
-    _debug_info["embedding_model"] = config["embedding_model"]
+
+    # Repli llama-swap (/v1/embeddings). IMPORTANT : rag-embed = bge-base 768-d,
+    # meme espace vectoriel que FastEmbed, sinon la recherche est corrompue.
+    _debug_info["embedding_model"] = config["embed_model"]
     req_timeout = None if timeout == 0 else timeout
-    
+    url = config["api_base"].rstrip("/") + "/embeddings"
     try:
         resp = requests.post(
-            f"{config['ollama_host']}/api/embeddings",
-            json={"model": config["embedding_model"], "prompt": text[:2000]},
+            url,
+            json={"model": config["embed_model"], "input": text[:2000]},
             timeout=req_timeout
         )
-        elapsed = time.time() - start
-        _debug_info["embedding_total_time"] += elapsed
-        
+        _debug_info["embedding_total_time"] += time.time() - start
         if resp.status_code == 200:
-            return resp.json().get("embedding", [])
+            data = resp.json().get("data", [])
+            if data:
+                return data[0].get("embedding", [])
         return []
     except Exception:
         _debug_info["embedding_total_time"] += time.time() - start
@@ -1392,16 +1424,19 @@ def get_embedding(text):
             pass
     
     try:
+        _api = os.environ.get("LLM_API_BASE", "http://127.0.0.1:11434/v1").rstrip("/")
         resp = requests.post(
-            f"{os.environ.get('OLLAMA_HOST', 'http://localhost:11434')}/api/embeddings",
+            f"{_api}/embeddings",
             json={
-                "model": os.environ.get("EMBEDDING_MODEL_OLLAMA", "nomic-embed-text"),
-                "prompt": text[:2000]
+                "model": os.environ.get("LLM_EMBED_MODEL", "rag-embed"),
+                "input": text[:2000]
             },
             timeout=int(os.environ.get("EMBEDDING_TIMEOUT", "60"))
         )
         if resp.status_code == 200:
-            return resp.json().get("embedding", [])
+            _d = resp.json().get("data", [])
+            if _d:
+                return _d[0].get("embedding", [])
     except Exception:
         pass
     return []
@@ -1622,16 +1657,19 @@ def _get_dense_embedding(text):
     
     # Fallback to Ollama
     try:
+        _api = os.environ.get("LLM_API_BASE", "http://127.0.0.1:11434/v1").rstrip("/")
         resp = requests.post(
-            f"{os.environ.get('OLLAMA_HOST', 'http://localhost:11434')}/api/embeddings",
+            f"{_api}/embeddings",
             json={
-                "model": os.environ.get("EMBEDDING_MODEL_OLLAMA", "nomic-embed-text"),
-                "prompt": text[:2000]
+                "model": os.environ.get("LLM_EMBED_MODEL", "rag-embed"),
+                "input": text[:2000]
             },
             timeout=int(os.environ.get("EMBEDDING_TIMEOUT", "60"))
         )
         if resp.status_code == 200:
-            return resp.json().get("embedding", [])
+            _d = resp.json().get("data", [])
+            if _d:
+                return _d[0].get("embedding", [])
     except Exception:
         pass
     return []
@@ -2661,8 +2699,8 @@ def get_config():
         "searxng_timeout": int(os.environ.get("SEARXNG_TIMEOUT", "15")),
         "max_results": int(os.environ.get("WEB_ONLY_MAX_RESULTS", "5")),
         "llm_timeout": int(os.environ.get("WEB_ONLY_TIMEOUT", "60")),
-        "ollama_host": os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
-        "llm_model": os.environ.get("LLM_MODEL", "qwen2.5:3b"),
+        "api_base": os.environ.get("LLM_API_BASE", "http://127.0.0.1:11434/v1"),
+        "llm_model": os.environ.get("LLM_MODEL_DEFAULT", os.environ.get("LLM_MODEL", "rag-default")),
         "temperature": float(os.environ.get("TEMPERATURE", "0.2")),
         "num_predict": int(os.environ.get("NUM_PREDICT_DEFAULT", "800")),
         "verbose": os.environ.get("VERBOSE", "").lower() == "true",
@@ -2725,18 +2763,20 @@ Answer:"""
         req_timeout = None if timeout == 0 else timeout
         
         resp = requests.post(
-            f"{config['ollama_host']}/api/generate",
+            config["api_base"].rstrip("/") + "/chat/completions",
             json={
                 "model": config["llm_model"],
-                "prompt": prompt,
-                "stream": False,
-                "options": {"num_predict": config["num_predict"], "temperature": config["temperature"]}
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": config["num_predict"],
+                "temperature": config["temperature"],
+                "stream": False
             },
             timeout=req_timeout
         )
         
         if resp.status_code == 200:
-            return resp.json().get("response", "").strip()
+            _c = resp.json().get("choices", [])
+            return (_c[0].get("message", {}).get("content") or "").strip() if _c else ""
         else:
             return f"LLM error: HTTP {resp.status_code}"
     except requests.exceptions.Timeout:
@@ -2820,7 +2860,7 @@ def _get_config():
         "sample_size": int(os.environ.get("RAGAS_SAMPLE_SIZE", "10")),
         "dataset_path": os.environ.get("RAGAS_DATASET_PATH", "./cache/ragas_test.json"),
         "sla_threshold": float(os.environ.get("RAGAS_SLA_THRESHOLD", "0.80")),
-        "llm_model": os.environ.get("RAGAS_LLM_MODEL", os.environ.get("LLM_MODEL", "qwen2.5:3b")),
+        "llm_model": os.environ.get("RAGAS_LLM_MODEL", os.environ.get("LLM_MODEL_DEFAULT", "rag-default")),
         "ollama_host": os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
         "debug": os.environ.get("DEBUG", "").lower() == "true",
     }
@@ -4842,6 +4882,13 @@ done
 
 QUERY=$(echo "$EXTRA_ARGS" | sed 's/^ *//')
 
+# Mapping mode -> tier LLM (pilote la selection du modele dans llm_helper.py)
+case $MODE in
+    ultrafast) export QUERY_MODE_ACTIVE=quick ;;
+    full)      export QUERY_MODE_ACTIVE=deep ;;
+    *)         export QUERY_MODE_ACTIVE=default ;;
+esac
+
 if [ -z "$QUERY" ]; then
     echo "Usage: ./query.sh [options] 'question'"
     echo "Try: ./query.sh --help"
@@ -5067,7 +5114,7 @@ export SEARXNG_TIMEOUT="${SEARXNG_TIMEOUT:-15}"
 export WEB_ONLY_MAX_RESULTS="${WEB_ONLY_MAX_RESULTS:-5}"
 export WEB_ONLY_TIMEOUT="${WEB_ONLY_TIMEOUT:-60}"
 export OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
-export LLM_MODEL="${LLM_MODEL:-qwen2.5:3b}"
+export LLM_MODEL="${LLM_MODEL:-rag-default}"
 export TEMPERATURE="${TEMPERATURE:-0.2}"
 export NUM_PREDICT_DEFAULT="${NUM_PREDICT_DEFAULT:-800}"
 
@@ -5124,7 +5171,7 @@ echo "Request: $QUERY"
 echo ""
 
 export OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
-export LLM_MODEL="${LLM_MODEL:-qwen2.5:3b}"
+export LLM_MODEL="${LLM_MODEL:-rag-default}"
 export MAPREDUCE_CHUNK_SIZE="${MAPREDUCE_CHUNK_SIZE:-4000}"
 export MAPREDUCE_BATCH_SIZE="${MAPREDUCE_BATCH_SIZE:-3}"
 export MAPREDUCE_CHUNK_TIMEOUT="${MAPREDUCE_CHUNK_TIMEOUT:-120}"
@@ -5178,7 +5225,7 @@ echo "Extract: $QUERY"
 echo ""
 
 export OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
-export LLM_MODEL="${LLM_MODEL:-qwen2.5:3b}"
+export LLM_MODEL="${LLM_MODEL:-rag-default}"
 export EXTRACTION_CHUNK_SIZE="${EXTRACTION_CHUNK_SIZE:-3000}"
 export EXTRACTION_DEDUP_THRESHOLD="${EXTRACTION_DEDUP_THRESHOLD:-0.85}"
 
@@ -5591,7 +5638,7 @@ echo -e "${BLUE}=== 2. Services ===${NC}"
 
 run_test "Docker running" "systemctl is-active docker" "active" 10
 run_test "Qdrant responding" "curl -s --max-time 5 http://localhost:6333/collections" "collections" 10
-run_test "Ollama responding" "curl -s --max-time 5 http://localhost:11434/api/tags" "models" 10
+run_test "LLM backend (llama-swap)" "curl -s --max-time 5 http://127.0.0.1:11434/v1/models" "data" 10
 run_test "SearXNG JSON" "curl -s --max-time 5 'http://localhost:8085/search?q=test&format=json'" "results" 15
 echo ""
 
