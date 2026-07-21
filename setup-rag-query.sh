@@ -38,6 +38,7 @@ n'est qu'un repli et doit rester dans le meme espace vectoriel (bge-base, 768-d)
 import os
 import requests
 import time
+from typing import Any, Dict, Optional
 
 # Suivi de debug des appels LLM et embeddings
 _debug_info = {
@@ -106,12 +107,14 @@ def get_config():
         "temperature": _float_env("TEMPERATURE", 0.2),
     }
 
-def llm_generate(prompt, max_tokens=500, timeout=None, temperature=None, response_format=None):
+def llm_generate(prompt, max_tokens=500, timeout=None, temperature=None,
+                 response_format: Optional[Dict[str, Any]] = None):
     """Genere du texte via l'API OpenAI-compatible (/v1/chat/completions).
 
-    response_format (optionnel) : dict OpenAI-compatible (ex. json_schema) passe
-    tel quel a llama-server pour contraindre la sortie. Ignore par les backends
-    qui ne le supportent pas.
+    response_format (optionnel) : objet OpenAI-compatible (ex. json_schema),
+    serialise tel quel dans le payload JSON envoye a llama-server -> c'est
+    forcement un dict (pas un modele Pydantic). Ignore par les backends qui ne
+    le supportent pas.
     """
     global _debug_info
     config = get_config()
@@ -4864,14 +4867,14 @@ cd "$SCRIPT_DIR"
 [ -f "./config.env" ] && { set -a; source ./config.env; set +a; }
 
 usage() {
-    local self
-    self="$(basename "$0")"
-    echo "Usage: ./$self <document> [more documents...] [focus request...]"
+    # Print the command exactly as invoked ($0), so examples are runnable
+    # whether called via ./summarize.sh, an absolute path, or on $PATH.
+    echo "Usage: $0 <document> [more documents...] [focus request...]"
     echo ""
     echo "Examples:"
-    echo "  ./$self contract.pdf"
-    echo "  ./$self report.docx focus on recommendations"
-    echo "  ./$self ./docs/*.pdf            # summarize every match"
+    echo "  $0 contract.pdf"
+    echo "  $0 report.docx focus on recommendations"
+    echo "  $0 ./docs/*.pdf            # summarize every match"
     echo ""
     echo "Map/Reduce Mode (System): summarizes entire documents via chunked"
     echo "processing. Multiple files are summarized in turn; all non-file"
