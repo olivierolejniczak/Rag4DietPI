@@ -5017,11 +5017,14 @@ run_test() {
     TESTS_RUN=$((TESTS_RUN + 1))
     log_test "$name"
     
+    # Test harness must never abort the whole run on one failing test: keep
+    # errexit OFF so run_test tallies the failure and the suite continues to the
+    # summary. (Previously a trailing `set -e` here leaked and aborted the run on
+    # the first failing test.)
     set +e
     OUTPUT=$(timeout "$timeout" bash -c "$cmd" 2>&1)
     EXIT_CODE=$?
-    set -e
-    
+
     if [ $EXIT_CODE -eq 124 ]; then
         log_fail "$name (timeout after ${timeout}s)"
         return 1
