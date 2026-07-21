@@ -291,26 +291,40 @@ def smart_chunk(text, chunk_size=500, chunk_overlap=80, min_chunk_size=100, max_
     # Standard semantic chunking
     # Split on semantic boundaries
     sections = re.split(r'(?=\n##?\s)', text)
-    
+
+    # Pack consecutive small/medium sections together (up to chunk_size) instead
+    # of discarding any section below min_chunk_size. Dropping small sections
+    # silently lost short, heading-heavy documents (e.g. DOCX/PPTX made of many
+    # brief title+paragraph blocks): every section fell under min_chunk_size, so
+    # the file produced zero chunks and was reported as "empty".
+    pending = ""
+
     for section in sections:
         if not section.strip():
             continue
-        
-        # If section is small enough, keep as single chunk
+
         if len(section) <= max_chunk_size:
-            if len(section) >= min_chunk_size:
-                chunks.append(_make_chunk(section, "section"))
+            if pending and len(pending) + len(section) + 2 > chunk_size:
+                chunks.append(_make_chunk(pending.strip(), "section"))
+                pending = section
+            else:
+                pending = (pending + "\n\n" + section) if pending else section
             continue
-        
+
+        # Large section: flush what we accumulated, then split it on paragraphs.
+        if pending.strip():
+            chunks.append(_make_chunk(pending.strip(), "section"))
+            pending = ""
+
         # Split large sections on paragraphs
         paragraphs = re.split(r'\n\n+', section)
         current_chunk = ""
-        
+
         for para in paragraphs:
             para = para.strip()
             if not para:
                 continue
-            
+
             # Check if adding paragraph exceeds target
             if len(current_chunk) + len(para) + 2 > chunk_size and current_chunk:
                 if len(current_chunk) >= min_chunk_size:
@@ -320,18 +334,24 @@ def smart_chunk(text, chunk_size=500, chunk_overlap=80, min_chunk_size=100, max_
                 current_chunk = overlap_text + " " + para if overlap_text else para
             else:
                 current_chunk = current_chunk + "\n\n" + para if current_chunk else para
-            
+
             # Force split if exceeds max
             while len(current_chunk) > max_chunk_size:
                 split_point = _find_split_point(current_chunk, chunk_size)
                 chunks.append(_make_chunk(current_chunk[:split_point], "forced"))
                 # Always advance by at least one char so the loop can't stall.
                 current_chunk = current_chunk[max(split_point - chunk_overlap, 1):]
-        
-        # Add remaining content
-        if current_chunk and len(current_chunk) >= min_chunk_size:
-            chunks.append(_make_chunk(current_chunk, "paragraph"))
-    
+
+        # Carry the paragraph remainder forward so it can merge with the next
+        # section instead of being dropped for being under min_chunk_size.
+        if current_chunk.strip():
+            pending = current_chunk.strip()
+
+    # Always flush the final accumulated content — never drop it on the
+    # min_chunk_size rule (that is exactly what erased short DOCX/PPTX files).
+    if pending.strip():
+        chunks.append(_make_chunk(pending.strip(), "section"))
+
     return chunks
 
 def _is_table_content(text):
