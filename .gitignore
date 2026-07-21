@@ -64,9 +64,6 @@ temp/
 # Model cache (large, downloaded at runtime)
 cache/fastembed/
 
-# Web UI sessions
-webui/sessions/
-
 # Test outputs
 test_results/
 evaluation_results/

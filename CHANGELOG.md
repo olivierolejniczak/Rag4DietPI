@@ -159,7 +159,7 @@ The new `config.env` includes all settings. Key additions:
 
 ## Known Limitations
 
-1. **No REST API**: CLI-only (Web UI available separately)
+1. **No REST API**: CLI-only
 2. **No Docker Compose**: Services managed individually
 3. **No Streaming**: Full response generated before output
 4. **Single Collection**: One vector collection per instance

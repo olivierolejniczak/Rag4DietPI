@@ -127,12 +127,6 @@ if $FULL_BACKUP || $CONFIG_ONLY; then
         cp -r lib "$BACKUP_PATH/"
         log_ok "Python modules backed up ($(ls lib/*.py 2>/dev/null | wc -l) files)"
     fi
-    
-    # Web UI
-    if [ -d "webui" ]; then
-        cp -r webui "$BACKUP_PATH/"
-        log_ok "Web UI backed up"
-    fi
 fi
 
 # ============================================================================
@@ -388,17 +382,6 @@ if ! $DATA_ONLY; then
             mkdir -p "$PROJECT_DIR/lib"
             cp -r "$BACKUP_PATH/lib"/* "$PROJECT_DIR/lib/"
             log_ok "Python modules restored"
-        fi
-    fi
-    
-    # Web UI
-    if [ -d "$BACKUP_PATH/webui" ]; then
-        if $DRY_RUN; then
-            echo "  Would restore: webui/"
-        else
-            mkdir -p "$PROJECT_DIR/webui"
-            cp -r "$BACKUP_PATH/webui"/* "$PROJECT_DIR/webui/"
-            log_ok "Web UI restored"
         fi
     fi
 fi

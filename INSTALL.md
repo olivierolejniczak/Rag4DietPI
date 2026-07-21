@@ -41,9 +41,6 @@ sudo bash setup-rag-core.sh
 sudo bash setup-rag-ingest.sh
 sudo bash setup-rag-query.sh
 
-# Optional: Web UI
-sudo bash setup-rag-webui.sh
-
 # Optional: Backup utilities
 sudo bash setup-rag-backup.sh
 ```
@@ -380,5 +377,4 @@ python3 --version
 
 - [Read the full documentation](README.md)
 - [Configure advanced features](FEATURES.md)
-- [Set up the Web UI](WEBUI.md)
 - [Learn about backup/restore](BACKUP.md)

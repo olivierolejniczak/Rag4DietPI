@@ -212,7 +212,6 @@ RESPONSE_CACHE_ENABLED=true
 | `setup-rag-core.sh` | Install core dependencies (Docker, Qdrant, Ollama, SearXNG) |
 | `setup-rag-ingest.sh` | Create document ingestion pipeline |
 | `setup-rag-query.sh` | Create query processing pipeline |
-| `setup-rag-webui.sh` | Optional web interface |
 | `setup-rag-backup.sh` | Backup and restore utilities |
 | `ingest.sh` | Ingest documents |
 | `query.sh` | Query the system |
@@ -221,24 +220,6 @@ RESPONSE_CACHE_ENABLED=true
 | `evaluate.sh` | Run RAGAS quality evaluation |
 | `backup.sh` | Create backup |
 | `restore.sh` | Restore from backup |
-
-## Web Interface (Optional)
-
-```bash
-# Install web UI
-sudo bash setup-rag-webui.sh
-
-# Start web server
-./webui.sh
-
-# Access at http://localhost:5000 or http://<your-ip>:5000
-```
-
-Features:
-- ChatGPT-style conversation interface
-- Mode selection (Standard/RAG-only/Web/Full)
-- Source citations
-- Mobile-friendly design
 
 ## Comparison with Similar Projects
 
@@ -251,7 +232,6 @@ Features:
 | Map/Reduce Summary | ✅ | ❌ | ❌ | ❌ |
 | Self-Reflection | ✅ | ❌ | ✅ | ❌ |
 | SBC/ARM Support | ✅ | ⚠️ | ❌ | ❌ |
-| Web UI | ✅ | ✅ | ✅ | ❌ |
 | Docker Compose | ❌ | ✅ | ✅ | ✅ |
 
 ## Troubleshooting
