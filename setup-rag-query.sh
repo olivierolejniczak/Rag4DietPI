@@ -3333,9 +3333,9 @@ import re
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Optional
 
-ResponseFormat = Dict[str, Any]  # OpenAI-compatible response_format (JSON object)
+from llm_helper import ResponseFormat  # centralized structured-output type
 from dotenv import load_dotenv
 
 load_dotenv("config.env")
@@ -3580,9 +3580,9 @@ import re
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-ResponseFormat = Dict[str, Any]  # OpenAI-compatible response_format (JSON object)
+from llm_helper import ResponseFormat  # centralized structured-output type
 from dotenv import load_dotenv
 
 load_dotenv("config.env")
