@@ -74,17 +74,30 @@ CPU_COUNT=$(nproc)
 # LC_ALL=C : force le point decimal (sinon fr_FR donne "4700,0000" et la virgule
 # casse l'arithmetique bash). sed 's/[.,].*//' garde la partie entiere quel que
 # soit le separateur.
-CPU_MHZ=$(LC_ALL=C lscpu 2>/dev/null | awk -F': +' '/CPU max MHz/{print $2}' | sed 's/[.,].*//')
-if [ -z "$CPU_MHZ" ] || [ "$CPU_MHZ" = "0" ]; then
-    # Fallback: try current MHz
-    CPU_MHZ=$(LC_ALL=C lscpu 2>/dev/null | awk -F': +' '/CPU MHz/{print $2}' | sed 's/[.,].*//')
+# Override manuel via CPU_MHZ_OVERRIDE pour les environnements ou lscpu n'expose
+# pas de frequence numerique exploitable (certaines VM, ARM, valeurs en plage...).
+if [ -n "${CPU_MHZ_OVERRIDE:-}" ]; then
+    CPU_MHZ="$CPU_MHZ_OVERRIDE"
+    log_info "Frequence CPU forcee via CPU_MHZ_OVERRIDE=${CPU_MHZ} MHz"
+else
+    CPU_MHZ=$(LC_ALL=C lscpu 2>/dev/null | awk -F': +' '/CPU max MHz/{print $2}' | sed 's/[.,].*//')
+    if [ -z "$CPU_MHZ" ] || [ "$CPU_MHZ" = "0" ]; then
+        # Fallback: try current MHz
+        CPU_MHZ=$(LC_ALL=C lscpu 2>/dev/null | awk -F': +' '/CPU MHz/{print $2}' | sed 's/[.,].*//')
+    fi
+    if [ -z "$CPU_MHZ" ] || [ "$CPU_MHZ" = "0" ]; then
+        # Last resort: read from cpuinfo
+        CPU_MHZ=$(awk '/cpu MHz/{print $4; exit}' /proc/cpuinfo | sed 's/[.,].*//')
+    fi
 fi
-if [ -z "$CPU_MHZ" ] || [ "$CPU_MHZ" = "0" ]; then
-    # Last resort: read from cpuinfo
-    CPU_MHZ=$(awk '/cpu MHz/{print $4; exit}' /proc/cpuinfo | sed 's/[.,].*//')
-fi
-# Validation : uniquement des chiffres, sinon valeur de repli.
-case "$CPU_MHZ" in ''|*[!0-9]*) CPU_MHZ=1000 ;; esac
+# Validation : uniquement des chiffres. Sinon repli EXPLICITE (signale) a 1000 MHz,
+# ce qui minore CPU_SCORE (selection de modele/timeouts plus prudents).
+case "$CPU_MHZ" in
+    ''|*[!0-9]*)
+        log_warn "Detection frequence CPU echouee (valeur: '${CPU_MHZ:-vide}') — repli sur 1000 MHz. Surchargez via CPU_MHZ_OVERRIDE=<MHz>."
+        CPU_MHZ=1000
+        ;;
+esac
 
 CPU_SCORE=$((CPU_COUNT * CPU_MHZ / 1000))
 
