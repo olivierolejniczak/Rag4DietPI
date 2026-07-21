@@ -4861,42 +4861,49 @@ cd "$SCRIPT_DIR"
 
 [ -f "./config.env" ] && { set -a; source ./config.env; set +a; }
 
-if [ -z "$1" ]; then
-    echo "Usage: ./summarize.sh <document> [more documents...] [\"focus request\"]"
+usage() {
+    echo "Usage: ./summarize.sh <document> [more documents...] [focus request...]"
     echo ""
     echo "Examples:"
     echo "  ./summarize.sh contract.pdf"
-    echo "  ./summarize.sh report.docx 'focus on recommendations'"
+    echo "  ./summarize.sh report.docx focus on recommendations"
     echo "  ./summarize.sh ./docs/*.pdf            # summarize every match"
     echo ""
-    echo "Map/Reduce Mode (System): Summarizes entire document using"
-    echo "chunked processing for long documents. Multiple files are summarized"
-    echo "in turn; a single non-file argument is used as the focus request."
+    echo "Map/Reduce Mode (System): summarizes entire documents via chunked"
+    echo "processing. Multiple files are summarized in turn; all non-file"
+    echo "arguments are joined into the focus request (quotes optional)."
+}
+
+if [ -z "$1" ]; then
+    usage
     exit 1
 fi
 
-# Separate existing files from an optional focus prompt. A glob like *.pdf
-# expands to many paths; summarize each instead of silently dropping the rest
-# and mistaking the 2nd file path for the focus prompt. A single non-file
-# argument is treated as the focus prompt and applied to every document.
+# Separate existing files from the focus request. A glob like *.pdf expands to
+# many paths; summarize each instead of dropping the rest or mistaking the 2nd
+# file path for the prompt. -h/--help prints usage. Every non-file argument is
+# joined into the focus request, so it works with or without quotes.
 FILES=()
-QUERY=""
+QUERY_PARTS=()
 for arg in "$@"; do
+    case "$arg" in
+        -h|--help) usage; exit 0 ;;
+    esac
     if [ -f "$arg" ]; then
         FILES+=("$arg")
-    elif [ -z "$QUERY" ]; then
-        QUERY="$arg"
     else
-        echo "Warning: ignoring unrecognized argument (not a file): $arg" >&2
+        QUERY_PARTS+=("$arg")
     fi
 done
 
 if [ "${#FILES[@]}" -eq 0 ]; then
-    echo "Error: no existing document given.${QUERY:+ (\"$QUERY\" is not a file)}"
-    echo "Usage: ./summarize.sh <document> [more documents...] [\"focus request\"]"
+    echo "Error: no existing document given.${QUERY_PARTS:+ (non-file arguments: ${QUERY_PARTS[*]})}"
+    echo ""
+    usage
     exit 1
 fi
 
+QUERY="${QUERY_PARTS[*]}"
 QUERY="${QUERY:-Summarize this document}"
 
 export OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"

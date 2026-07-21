@@ -297,6 +297,24 @@ def smart_chunk(text, chunk_size=500, chunk_overlap=80, min_chunk_size=100, max_
     # silently lost short, heading-heavy documents (e.g. DOCX/PPTX made of many
     # brief title+paragraph blocks): every section fell under min_chunk_size, so
     # the file produced zero chunks and was reported as "empty".
+    # chunk_size is the packing TARGET; max_chunk_size is the hard cap. flush()
+    # emits accumulated "pending" content and force-splits anything above the
+    # cap, so no emitted section chunk exceeds max_chunk_size — even if pending
+    # grew past it or chunk_size is misconfigured >= max_chunk_size.
+    def flush(buf):
+        buf = buf.strip()
+        # Split target must be <= the cap (chunk_size may be misconfigured above
+        # max_chunk_size); clamp the point so every emitted piece is <= the cap.
+        cap = max(1, min(chunk_size, max_chunk_size))
+        while len(buf) > max_chunk_size:
+            split_point = min(_find_split_point(buf, cap), max_chunk_size)
+            if split_point < 1:
+                split_point = max_chunk_size
+            chunks.append(_make_chunk(buf[:split_point], "section"))
+            buf = buf[max(split_point - chunk_overlap, 1):].strip()
+        if buf:
+            chunks.append(_make_chunk(buf, "section"))
+
     pending = ""
 
     for section in sections:
@@ -305,16 +323,15 @@ def smart_chunk(text, chunk_size=500, chunk_overlap=80, min_chunk_size=100, max_
 
         if len(section) <= max_chunk_size:
             if pending and len(pending) + len(section) + 2 > chunk_size:
-                chunks.append(_make_chunk(pending.strip(), "section"))
+                flush(pending)
                 pending = section
             else:
                 pending = (pending + "\n\n" + section) if pending else section
             continue
 
         # Large section: flush what we accumulated, then split it on paragraphs.
-        if pending.strip():
-            chunks.append(_make_chunk(pending.strip(), "section"))
-            pending = ""
+        flush(pending)
+        pending = ""
 
         # Split large sections on paragraphs
         paragraphs = re.split(r'\n\n+', section)
@@ -347,10 +364,9 @@ def smart_chunk(text, chunk_size=500, chunk_overlap=80, min_chunk_size=100, max_
         if current_chunk.strip():
             pending = current_chunk.strip()
 
-    # Always flush the final accumulated content — never drop it on the
-    # min_chunk_size rule (that is exactly what erased short DOCX/PPTX files).
-    if pending.strip():
-        chunks.append(_make_chunk(pending.strip(), "section"))
+    # Always flush the final accumulated content (force-split if over the cap) —
+    # never drop it on the min_chunk_size rule (that erased short DOCX/PPTX).
+    flush(pending)
 
     return chunks
 
