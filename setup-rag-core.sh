@@ -845,7 +845,7 @@ log_ok "config.env created"
 # Create status.sh
 cat > "$PROJECT_DIR/status.sh" << 'EOFSTATUS'
 #!/bin/bash
-source ./config.env 2>/dev/null || true
+set -a; source ./config.env 2>/dev/null || true; set +a
 
 G='\033[1;32m'; R='\033[1;31m'; Y='\033[1;33m'; B='\033[1;34m'; C='\033[1;36m'; M='\033[1;35m'; N='\033[0m'
 
@@ -926,7 +926,7 @@ cat > "$PROJECT_DIR/evaluate.sh" << 'EOFEVAL'
 #   ./evaluate.sh --report                        # Run batch evaluation
 
 cd "$(dirname "$0")"
-source ./config.env 2>/dev/null || true
+set -a; source ./config.env 2>/dev/null || true; set +a
 
 # Colors
 G='\033[1;32m'; R='\033[1;31m'; Y='\033[1;33m'; B='\033[1;34m'; N='\033[0m'
@@ -1123,7 +1123,7 @@ BLUE='\033[1;34m'
 NC='\033[0m'
 
 # Configuration
-source ./config.env 2>/dev/null || true
+set -a; source ./config.env 2>/dev/null || true; set +a
 REFRESH_INTERVAL=${1:-5}
 
 while true; do
@@ -1236,7 +1236,7 @@ log_ok "monitor.sh created (cache)"
 cat > "$PROJECT_DIR/cache-stats.sh" << 'EOFCACHE'
 #!/bin/bash
 # Cache Statistics Viewer cache
-source ./config.env 2>/dev/null || true
+set -a; source ./config.env 2>/dev/null || true; set +a
 
 # Colors
 GREEN='\033[1;32m'
@@ -1334,7 +1334,7 @@ log_ok "cache-stats.sh created (cache)"
 cat > "$PROJECT_DIR/clear-cache.sh" << 'EOFCLEAR'
 #!/bin/bash
 # Clear Cache Utility cache
-source ./config.env 2>/dev/null || true
+set -a; source ./config.env 2>/dev/null || true; set +a
 
 echo "Clearing query caches..."
 

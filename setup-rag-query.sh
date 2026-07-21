@@ -23,7 +23,7 @@ echo ""
 mkdir -p "$PROJECT_DIR"/{lib,cache}
 cd "$PROJECT_DIR"
 
-[ -f "./config.env" ] && source ./config.env
+[ -f "./config.env" ] && { set -a; source ./config.env; set +a; }
 
 log_info "Creating llm_helper.py..."
 cat > "$PROJECT_DIR/lib/llm_helper.py" << 'EOFPY'
@@ -4783,7 +4783,7 @@ cat > "$PROJECT_DIR/query.sh" << 'EOFQUERY'
 # Modes: default, --rag-only, --web-only, --ultrafast, --full
 
 cd "$(dirname "$0")"
-source ./config.env 2>/dev/null || true
+set -a; source ./config.env 2>/dev/null || true; set +a
 
 export OLLAMA_HOST LLM_MODEL TEMPERATURE QDRANT_HOST QDRANT_GRPC_PORT COLLECTION_NAME
 export ANSWER_LANG
@@ -4929,7 +4929,7 @@ cat > "$PROJECT_DIR/query-tiered-cache.sh" << 'EOFTIERED'
 # RAG System cache - Tiered Query Mode
 # Provides three performance tiers: quick, default, deep
 set -e
-source ./config.env 2>/dev/null || true
+set -a; source ./config.env 2>/dev/null || true; set +a
 
 # Colors
 BLUE='\033[1;34m'
@@ -5037,7 +5037,7 @@ cat > "$PROJECT_DIR/evaluate.sh" << 'EOFEVAL'
 #!/bin/bash
 # RAG Quality Evaluation web
 cd "$(dirname "$0")"
-source ./config.env 2>/dev/null || true
+set -a; source ./config.env 2>/dev/null || true; set +a
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -5073,7 +5073,7 @@ cat > "$PROJECT_DIR/web-query.sh" << 'EOFSH'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-[ -f "./config.env" ] && source ./config.env
+[ -f "./config.env" ] && { set -a; source ./config.env; set +a; }
 
 VERBOSE=false
 DEBUG=false
@@ -5140,7 +5140,7 @@ cat > "$PROJECT_DIR/summarize.sh" << 'EOFSH'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-[ -f "./config.env" ] && source ./config.env
+[ -f "./config.env" ] && { set -a; source ./config.env; set +a; }
 
 if [ -z "$1" ]; then
     echo "Usage: ./summarize.sh <document> [specific request]"
@@ -5192,7 +5192,7 @@ cat > "$PROJECT_DIR/extract.sh" << 'EOFSH'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-[ -f "./config.env" ] && source ./config.env
+[ -f "./config.env" ] && { set -a; source ./config.env; set +a; }
 
 if [ -z "$1" ] || [ -z "$2" ]; then
     echo "Usage: ./extract.sh <document> <what to extract>"
