@@ -2035,98 +2035,6 @@ def verify_grounding(answer, chunks, threshold=0.5):
 EOFPY
 log_ok "generation.py"
 
-log_info "Creating llm_judge.py..."
-cat > "$PROJECT_DIR/lib/llm_judge.py" << 'EOFPY'
-"""LLM-based relevance judge (adaptive cascade gate).
-
-Rates how well the retrieved context supports a complete, specific and correct
-answer to the query, returning a score in [0, 1]. The adaptive cascade uses it
-to decide whether to escalate to the next tier (multi-pass -> web -> full),
-replacing the lenient lexical retrieval-confidence heuristic.
-"""
-import os
-import re
-import json
-
-from llm_helper import llm_generate
-
-# Native structured output: force llama-server to emit a JSON object.
-_JUDGE_SCHEMA = {"type": "json_object"}
-
-
-def _int_env(key, default):
-    try:
-        return int(os.environ.get(key, ""))
-    except (TypeError, ValueError):
-        return int(default)
-
-
-def _build_context(chunks, max_chars):
-    """Concatenate chunk text up to max_chars for the judge prompt."""
-    parts = []
-    total = 0
-    for c in chunks:
-        text = c.get("text", "") if isinstance(c, dict) else str(c)
-        if not text:
-            continue
-        if total + len(text) > max_chars:
-            text = text[: max(0, max_chars - total)]
-        parts.append(text)
-        total += len(text)
-        if total >= max_chars:
-            break
-    return "\n\n".join(parts)
-
-
-def judge_relevance(query, chunks, config=None):
-    """Return (score in [0,1], reason) for how well chunks answer query.
-
-    Returns (None, None) if the LLM call fails, so the caller can fall back to
-    the lexical heuristic.
-    """
-    if not chunks:
-        return 0.0, "no context"
-
-    max_chars = _int_env("LLM_JUDGE_MAX_CONTEXT", 3000)
-    timeout = _int_env("LLM_JUDGE_TIMEOUT", 45)
-    context = _build_context(chunks, max_chars)
-
-    prompt = (
-        "You are a strict retrieval-quality judge. Given a QUESTION and retrieved "
-        "CONTEXT passages, rate how well the CONTEXT supports a complete, specific "
-        "and correct answer to the QUESTION.\n"
-        'Return ONLY JSON: {"score": <float 0..1>, "reason": "<max 12 words>"}\n'
-        "Scoring: 1.0 = fully answers with specifics; 0.5 = partially relevant, "
-        "missing key specifics; 0.0 = irrelevant or off-topic.\n\n"
-        f"QUESTION: {query}\n\nCONTEXT:\n{context}"
-    )
-
-    raw = llm_generate(prompt, max_tokens=120, timeout=timeout,
-                       temperature=0.0, response_format=_JUDGE_SCHEMA)
-    if not raw:
-        return None, None
-
-    score = None
-    reason = ""
-    try:
-        data = json.loads(raw)
-        score = float(data.get("score"))
-        reason = str(data.get("reason", ""))[:80]
-    except (ValueError, TypeError, AttributeError):
-        # Fallback: pull the first plausible float out of the raw text.
-        m = re.search(r"(?<![\d.])(?:0(?:\.\d+)?|1(?:\.0+)?)(?![\d])", raw)
-        if m:
-            try:
-                score = float(m.group(0))
-            except ValueError:
-                score = None
-
-    if score is None:
-        return None, None
-    return max(0.0, min(1.0, score)), reason
-EOFPY
-log_ok "llm_judge.py"
-
 log_info "Creating quality_ledger.py..."
 cat > "$PROJECT_DIR/lib/quality_ledger.py" << 'EOFPY'
 """Quality Ledger for tracking retrieval and answer quality (quality+)"""
@@ -4122,7 +4030,6 @@ from query_enhancement import (
 from hybrid_search import hybrid_search, get_hybrid_mode
 from post_retrieval import rerank_chunks, crag_process, apply_rse, expand_context_window, apply_diversity_filter
 from generation import generate_answer, verify_grounding
-from llm_judge import judge_relevance
 from quality_ledger import QualityLedger, compute_retrieval_confidence, compute_answer_coverage
 from memory import ConversationMemory
 from query_cache import QueryCache
@@ -4163,8 +4070,6 @@ def get_config():
         "abstention_enabled": os.environ.get("ABSTENTION_ENABLED", "true").lower() == "true",
         # adaptive: escalating cascade (rag -> multipass -> web -> full) driven by confidence
         "adaptive_enabled": os.environ.get("ADAPTIVE_ENABLED", "false").lower() == "true",
-        # adaptive: use an LLM judge (instead of the lexical heuristic) as the gate
-        "llm_judge_enabled": os.environ.get("LLM_JUDGE_ENABLED", "true").lower() == "true",
         
         # multipass: Multi-pass retrieval flags
         "hypothetical_title_enabled": os.environ.get("HYPOTHETICAL_TITLE_ENABLED", "false").lower() == "true",
@@ -4182,9 +4087,12 @@ def get_config():
         "num_predict": _int_env("NUM_PREDICT_OVERRIDE", _int_env("NUM_PREDICT", 500)),
         "confidence_threshold": _float_env("RETRIEVAL_CONFIDENCE_MIN", 0.3),
         "coverage_threshold": _float_env("ANSWER_COVERAGE_MIN", 0.2),
-        # adaptive: escalate to the next tier while the gate score stays below
-        # this; max_tier caps the ladder (0=rag, 1=+multipass, 2=+web, 3=full).
-        "escalate_threshold": _float_env("ESCALATE_CONFIDENCE_MIN", 0.6),
+        # adaptive: gate is the cross-encoder reranker score (0..1). Escalate to
+        # the next tier while it stays below escalate_threshold; abstain only if
+        # the best tier stays below abstention_floor (answer whenever there is a
+        # minimally relevant chunk). max_tier caps the ladder (0..3).
+        "escalate_threshold": _float_env("ESCALATE_CONFIDENCE_MIN", 0.35),
+        "abstention_floor": _float_env("ABSTENTION_MIN", 0.05),
         "max_tier": _int_env("MAX_TIER", 3),
         "abstention_message": os.environ.get("ABSTENTION_MESSAGE", 
             "Je n'ai pas assez d'informations fiables pour repondre avec confiance."),
@@ -4315,13 +4223,22 @@ def _add_web_chunks(chunks, web_results):
 
 
 def _gate_score(query, chunks, config):
-    """Escalation gate: the LLM judge if enabled, else the lexical heuristic."""
-    if config.get("llm_judge_enabled") and chunks:
-        score, reason = judge_relevance(query, chunks, config)
-        if score is not None:
-            print(f"[JUDGE] relevance {score:.2f}" + (f" - {reason}" if reason else ""))
-            return score
-    return compute_retrieval_confidence(chunks)
+    """Escalation/abstention gate: a semantic relevance score in [0, 1].
+
+    Uses the cross-encoder reranker (FlashRank): fast, deterministic and
+    discriminating (relevant top chunk ~0.7-0.9, off-topic ~0.0). It replaces
+    the old rank-based lexical heuristic, which saturated near 0.8 for every
+    query and defeated escalation. Reorders chunks in place so the best evidence
+    leads answer generation.
+    """
+    if not chunks:
+        return 0.0
+    ranked = rerank_chunks(query, chunks, top_k=len(chunks))
+    if ranked:
+        chunks[:] = ranked
+    top = max((float(c.get("rerank_score", 0) or 0) for c in chunks), default=0.0)
+    print(f"[GATE] relevance {top:.3f}")
+    return top
 
 
 def _print_rag_only(chunks, config):
@@ -4524,10 +4441,13 @@ def main(query):
 
         print(f"[ADAPTIVE] Answer tier: {tier_used} (score {retrieval_confidence:.2f})")
     
-    # Abstention check
-    if config["abstention_enabled"] and retrieval_confidence < config["confidence_threshold"]:
+    # Abstention check. Adaptive mode gates on the reranker score, so it uses the
+    # low abstention_floor (answer whenever a minimally relevant chunk exists);
+    # pinned modes keep the legacy heuristic threshold.
+    abstain_min = config["abstention_floor"] if adaptive else config["confidence_threshold"]
+    if config["abstention_enabled"] and retrieval_confidence < abstain_min:
         if verbose:
-            print(f"[QUALITY] Low confidence ({retrieval_confidence:.2f}), abstaining")
+            print(f"[QUALITY] Low relevance ({retrieval_confidence:.2f} < {abstain_min}), abstaining")
         
         # Log to ledger
         if config["quality_ledger_enabled"]:

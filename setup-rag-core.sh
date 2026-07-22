@@ -804,15 +804,16 @@ CRAG_ENABLED=false
 CRAG_THRESHOLD=0.4
 
 # Adaptive cascade (query.sh default mode): cache -> rag -> multipass -> web -> full.
-# Escalates only while the gate score stays below ESCALATE_CONFIDENCE_MIN, keeping
-# the best result at each tier. Pinned modes (--full/--ultrafast/--rag-only/
-# --web-only) and --no-adaptive disable it.
+# The gate is the cross-encoder reranker relevance score (0..1): a relevant top
+# chunk scores ~0.7-0.9, off-topic ~0.0. Escalates while it stays below
+# ESCALATE_CONFIDENCE_MIN, keeping the best result at each tier. Pinned modes
+# (--full/--ultrafast/--rag-only/--web-only) and --no-adaptive disable it.
 ADAPTIVE_ENABLED=true
-# Gate: an LLM judge (lib/llm_judge.py) rates retrieved-context relevance 0..1.
-# Set false to fall back to the lexical retrieval-confidence heuristic.
-LLM_JUDGE_ENABLED=true
-# Escalate to the next tier while the gate score is below this (precision-first).
-ESCALATE_CONFIDENCE_MIN=0.6
+# Escalate to the next tier while the gate score is below this.
+ESCALATE_CONFIDENCE_MIN=0.35
+# Abstain only if the best tier stays below this (answer whenever a minimally
+# relevant chunk exists).
+ABSTENTION_MIN=0.05
 # Cap escalation: 0=rag 1=+multipass 2=+web 3=full (also settable via --max-tier).
 MAX_TIER=3
 
