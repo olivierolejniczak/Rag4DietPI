@@ -4618,7 +4618,14 @@ while [[ $# -gt 0 ]]; do
         --multipass) export MULTIPASS_ENABLED=true; shift ;;
         --citations) export CITATIONS_ENABLED=true; shift ;;
         --no-adaptive) export ADAPTIVE_ENABLED=false; shift ;;
-        --max-tier) shift; export MAX_TIER="$1"; shift ;;
+        --max-tier)
+            shift
+            if ! [[ "${1:-}" =~ ^[0-3]$ ]]; then
+                echo "Error: --max-tier requires a value 0-3 (got '${1:-}')" >&2
+                exit 2
+            fi
+            export MAX_TIER="$1"
+            shift ;;
         --no-memory) export MEMORY_ENABLED=false; shift ;;
         --no-cache) export QUERY_CACHE_ENABLED=false; shift ;;
         --clear-cache)

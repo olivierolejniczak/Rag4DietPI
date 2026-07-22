@@ -24,7 +24,7 @@ os.chdir(PROJECT_DIR)
 # cat > "$PROJECT_DIR/<path>" << MARKER     (unquoted = vars expanded at gen time)
 HEADER = re.compile(
     r'''^cat\s*>\s*"\$(?:\{)?PROJECT_DIR(?:\})?/(?P<path>[^"]+)"\s*<<\s*'''
-    r'''(?P<q>['"]?)(?P<marker>\w+)(?P=q)\s*$'''
+    r'''(?P<q>['"]?)(?P<marker>[\w-]+)(?P=q)\s*$'''
 )
 
 
