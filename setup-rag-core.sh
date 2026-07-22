@@ -549,7 +549,8 @@ pip3 install --help 2>&1 | grep -q "break-system-packages" || PIP_FLAGS=""
 
 echo "Installing core packages..."
 pip3 install --quiet requests urllib3 rank-bm25 numpy $PIP_FLAGS 2>/dev/null || true
-pip3 install --quiet flashrank $PIP_FLAGS 2>/dev/null || true
+# FlashRank is required: it is the relevance gate for the adaptive query cascade.
+pip3 install --quiet flashrank $PIP_FLAGS 2>/dev/null || { log_err "FlashRank required (adaptive query gate)"; exit 1; }
 
 echo "Installing FastEmbed..."
 pip3 install --quiet fastembed $PIP_FLAGS 2>/dev/null || { log_err "FastEmbed required"; exit 1; }
@@ -908,7 +909,7 @@ python3 -c "from fastembed import TextEmbedding" 2>/dev/null && echo -e "FastEmb
 python3 -c "from qdrant_client import QdrantClient" 2>/dev/null && echo -e "Qdrant Client: ${G}OK${N}" || echo -e "Qdrant Client: ${R}Missing${N}"
 python3 -c "from unstructured.partition.auto import partition" 2>/dev/null && echo -e "Unstructured: ${G}OK${N}" || echo -e "Unstructured: ${R}Missing${N}"
 python3 -c "from spellchecker import SpellChecker" 2>/dev/null && echo -e "Spellcheck: ${G}OK${N} (pyspellchecker)" || echo -e "Spellcheck: ${Y}Unavailable${N}"
-python3 -c "from flashrank import Ranker" 2>/dev/null && echo -e "FlashRank: ${G}OK${N}" || echo -e "FlashRank: ${Y}Optional${N}"
+python3 -c "from flashrank import Ranker" 2>/dev/null && echo -e "FlashRank: ${G}OK${N}" || echo -e "FlashRank: ${R}Missing (required for query gate)${N}"
 
 echo ""
 echo "=== System Features ==="

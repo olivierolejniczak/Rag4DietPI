@@ -4234,9 +4234,13 @@ def _gate_score(query, chunks, config):
     if not chunks:
         return 0.0
     ranked = rerank_chunks(query, chunks, top_k=len(chunks))
-    if ranked:
-        chunks[:] = ranked
-    top = max((float(c.get("rerank_score", 0) or 0) for c in chunks), default=0.0)
+    scored = [c for c in (ranked or []) if isinstance(c, dict) and "rerank_score" in c]
+    if not scored:
+        # Reranker unavailable (e.g. flashrank not installed): degrade to the
+        # lexical heuristic rather than abstaining on every query.
+        return compute_retrieval_confidence(chunks)
+    chunks[:] = ranked
+    top = max((float(c.get("rerank_score", 0) or 0) for c in scored), default=0.0)
     print(f"[GATE] relevance {top:.3f}")
     return top
 
