@@ -549,7 +549,8 @@ pip3 install --help 2>&1 | grep -q "break-system-packages" || PIP_FLAGS=""
 
 echo "Installing core packages..."
 pip3 install --quiet requests urllib3 rank-bm25 numpy $PIP_FLAGS 2>/dev/null || true
-pip3 install --quiet flashrank $PIP_FLAGS 2>/dev/null || true
+# FlashRank is required: it is the relevance gate for the adaptive query cascade.
+pip3 install --quiet flashrank $PIP_FLAGS 2>/dev/null || { log_err "FlashRank required (adaptive query gate)"; exit 1; }
 
 echo "Installing FastEmbed..."
 pip3 install --quiet fastembed $PIP_FLAGS 2>/dev/null || { log_err "FastEmbed required"; exit 1; }
@@ -803,6 +804,20 @@ RELEVANCE_THRESHOLD=0.3
 CRAG_ENABLED=false
 CRAG_THRESHOLD=0.4
 
+# Adaptive cascade (query.sh default mode): cache -> rag -> multipass -> web -> full.
+# The gate is the cross-encoder reranker relevance score (0..1): a relevant top
+# chunk scores ~0.7-0.9, off-topic ~0.0. Escalates while it stays below
+# ESCALATE_CONFIDENCE_MIN, keeping the best result at each tier. Pinned modes
+# (--full/--ultrafast/--rag-only/--web-only) and --no-adaptive disable it.
+ADAPTIVE_ENABLED=true
+# Escalate to the next tier while the gate score is below this.
+ESCALATE_CONFIDENCE_MIN=0.35
+# Abstain only if the best tier stays below this (answer whenever a minimally
+# relevant chunk exists).
+ABSTENTION_MIN=0.05
+# Cap escalation: 0=rag 1=+multipass 2=+web 3=full (also settable via --max-tier).
+MAX_TIER=3
+
 # Citations (citations)
 CITATIONS_ENABLED=false
 
@@ -894,7 +909,7 @@ python3 -c "from fastembed import TextEmbedding" 2>/dev/null && echo -e "FastEmb
 python3 -c "from qdrant_client import QdrantClient" 2>/dev/null && echo -e "Qdrant Client: ${G}OK${N}" || echo -e "Qdrant Client: ${R}Missing${N}"
 python3 -c "from unstructured.partition.auto import partition" 2>/dev/null && echo -e "Unstructured: ${G}OK${N}" || echo -e "Unstructured: ${R}Missing${N}"
 python3 -c "from spellchecker import SpellChecker" 2>/dev/null && echo -e "Spellcheck: ${G}OK${N} (pyspellchecker)" || echo -e "Spellcheck: ${Y}Unavailable${N}"
-python3 -c "from flashrank import Ranker" 2>/dev/null && echo -e "FlashRank: ${G}OK${N}" || echo -e "FlashRank: ${Y}Optional${N}"
+python3 -c "from flashrank import Ranker" 2>/dev/null && echo -e "FlashRank: ${G}OK${N}" || echo -e "FlashRank: ${R}Missing (required for query gate)${N}"
 
 echo ""
 echo "=== System Features ==="

@@ -1938,22 +1938,32 @@ def generate_answer(query, chunks, memory_context="", config=None):
     
     # Build context from chunks
     context_parts = []
+    sources = []  # citations: (number, human-readable label) for the footer
     total_chars = 0
-    
+
     for i, chunk in enumerate(ordered_chunks):
         text = chunk.get("text", "") if isinstance(chunk, dict) else str(chunk)
         filename = chunk.get("filename", "unknown") if isinstance(chunk, dict) else "unknown"
-        
+
         if total_chars + len(text) > max_context:
             break
-        
+
         if citations_enabled:
             context_parts.append(f"[{i+1}] ({filename}): {text}")
+            # citations: build the reference detail shown to the user. Prefer a
+            # real source URL; the placeholder "web" (used by stored crawled
+            # chunks) is uninformative, so fall back to the filename/title.
+            src = (chunk.get("source") or chunk.get("url") or "") if isinstance(chunk, dict) else ""
+            if src and src != "web":
+                label = src
+            else:
+                label = filename or "web"
+            sources.append((i + 1, label))
         else:
             context_parts.append(text)
-        
+
         total_chars += len(text)
-    
+
     context = "\n\n".join(context_parts)
     
     # cache: Use relaxed prompt when web results are present (CRAG triggered)
@@ -1980,8 +1990,15 @@ Provide a concise answer based on the context. If the context doesn't contain re
     
     if citations_enabled:
         prompt += "\nCite sources using [1], [2], etc."
-    
-    return llm_generate(prompt, max_tokens)
+
+    answer = llm_generate(prompt, max_tokens)
+
+    # citations: append the reference list so [1], [2] map to real sources
+    if citations_enabled and answer and sources:
+        footer = "\n".join(f"[{num}] {label}" for num, label in sources)
+        answer = f"{answer}\n\nSources:\n{footer}"
+
+    return answer
 
 def verify_grounding(answer, chunks, threshold=0.5):
     """Verify answer is grounded in chunks."""
@@ -4051,6 +4068,8 @@ def get_config():
         "cache_enabled": os.environ.get("QUERY_CACHE_ENABLED", "true").lower() == "true",
         "quality_ledger_enabled": os.environ.get("QUALITY_LEDGER_ENABLED", "true").lower() == "true",
         "abstention_enabled": os.environ.get("ABSTENTION_ENABLED", "true").lower() == "true",
+        # adaptive: escalating cascade (rag -> multipass -> web -> full) driven by confidence
+        "adaptive_enabled": os.environ.get("ADAPTIVE_ENABLED", "false").lower() == "true",
         
         # multipass: Multi-pass retrieval flags
         "hypothetical_title_enabled": os.environ.get("HYPOTHETICAL_TITLE_ENABLED", "false").lower() == "true",
@@ -4068,6 +4087,13 @@ def get_config():
         "num_predict": _int_env("NUM_PREDICT_OVERRIDE", _int_env("NUM_PREDICT", 500)),
         "confidence_threshold": _float_env("RETRIEVAL_CONFIDENCE_MIN", 0.3),
         "coverage_threshold": _float_env("ANSWER_COVERAGE_MIN", 0.2),
+        # adaptive: gate is the cross-encoder reranker score (0..1). Escalate to
+        # the next tier while it stays below escalate_threshold; abstain only if
+        # the best tier stays below abstention_floor (answer whenever there is a
+        # minimally relevant chunk). max_tier caps the ladder (0..3).
+        "escalate_threshold": _float_env("ESCALATE_CONFIDENCE_MIN", 0.35),
+        "abstention_floor": _float_env("ABSTENTION_MIN", 0.05),
+        "max_tier": _int_env("MAX_TIER", 3),
         "abstention_message": os.environ.get("ABSTENTION_MESSAGE", 
             "Je n'ai pas assez d'informations fiables pour repondre avec confiance."),
         
@@ -4078,6 +4104,160 @@ def get_config():
         # multipass: Multi-pass parameters
         "multipass_variants": _int_env("MULTIPASS_VARIANTS", 3),
     }
+
+def _build_variants(query, config, verbose):
+    """Return (enhanced_queries, hyde_embedding) for one configuration."""
+    hyde_embedding = None
+    enhanced_queries = [query]
+
+    if config["query_classification_enabled"]:
+        query_type = classify_query(query)
+        if verbose:
+            print(f"[CLASSIFY] Type: {query_type}")
+
+    if config["multipass_enabled"]:
+        enhanced_queries = collect_query_variants(query, config)
+        if verbose:
+            print(f"[MULTIPASS] Variants ({len(enhanced_queries)})")
+            for i, v in enumerate(enhanced_queries[:5]):
+                print(f"  [{i+1}] {v[:80]}...")
+    else:
+        if config["hypothetical_title_enabled"]:
+            hypo_title = generate_hypothetical_title(query)
+            if hypo_title and hypo_title != query:
+                enhanced_queries.append(hypo_title)
+        if config["query_rewrite_enabled"]:
+            for rw in rewrite_query_multi(query, 3):
+                if rw and rw != query and rw not in enhanced_queries:
+                    enhanced_queries.append(rw)
+        if config["stepback_enabled"]:
+            stepback = generate_stepback_query(query)
+            if stepback and stepback != query:
+                enhanced_queries.append(stepback)
+        if config["subquery_enabled"]:
+            enhanced_queries.extend(decompose_query(query))
+
+    if config["hyde_enabled"]:
+        hyde_doc = generate_hyde_document(query)
+        if hyde_doc and hyde_doc != query:
+            hyde_embedding = get_embedding(hyde_doc)
+            if verbose:
+                print(f"[HYDE] Generated: {hyde_doc[:100]}...")
+
+    return enhanced_queries, hyde_embedding
+
+
+def _retrieve(query, config, verbose):
+    """Full retrieval + post-processing for one configuration; returns chunks."""
+    enhanced_queries, hyde_embedding = _build_variants(query, config, verbose)
+
+    all_chunks = []
+    if config["multipass_enabled"]:
+        max_variants = min(config["multipass_variants"], len(enhanced_queries))
+        for i, eq in enumerate(enhanced_queries[:max_variants]):
+            all_chunks.extend(hybrid_search(
+                eq, top_k=3, hyde_embedding=hyde_embedding if i == 0 else None))
+    else:
+        for eq in enhanced_queries[:3]:
+            all_chunks.extend(hybrid_search(
+                eq, top_k=config["top_k"],
+                hyde_embedding=hyde_embedding if eq == query else None))
+
+    # Deduplicate by ID
+    seen_ids = set()
+    unique_chunks = []
+    for chunk in all_chunks:
+        chunk_id = chunk.get("id")
+        if chunk_id not in seen_ids:
+            seen_ids.add(chunk_id)
+            unique_chunks.append(chunk)
+
+    if config["multipass_enabled"] and len(unique_chunks) > config["top_k"]:
+        unique_chunks = rerank_chunks(query, unique_chunks, top_k=config["rerank_top_k"])
+
+    chunks = unique_chunks[:config["top_k"] * 2]
+
+    # Post-retrieval processing
+    if config["rerank_enabled"]:
+        chunks = rerank_chunks(query, chunks, top_k=config["rerank_top_k"])
+    if config["diversity_filter_enabled"]:
+        chunks = apply_diversity_filter(chunks, config["diversity_threshold"])
+    if config["context_window_enabled"]:
+        chunks = expand_context_window(chunks, config["context_window_size"])
+    if config["rse_enabled"]:
+        chunks = apply_rse(query, chunks)
+
+    return chunks
+
+
+def _web_search(query, verbose):
+    """Run a web search, returning the raw results list."""
+    from web_search import search_web
+    results = search_web(query, max_results=3)
+    if verbose:
+        print(f"[WEB] {len(results)} results")
+        for wr in results[:3]:
+            print(f"  - [{wr.get('engine', '?')}] {wr.get('title', '')[:60]}")
+            print(f"    {wr.get('url', '')[:80]}")
+    return results
+
+
+def _add_web_chunks(chunks, web_results):
+    """Append web results as synthetic chunks scored on the RAG score scale."""
+    rag_scores = [
+        float(c.get("rerank_score") or c.get("rrf_score") or 0)
+        for c in chunks if isinstance(c, dict)
+    ]
+    web_score = max(rag_scores) if rag_scores else 0.5
+    out = list(chunks)
+    for i, wr in enumerate(web_results):
+        out.append({
+            "id": f"web_{i}",
+            "text": f"{wr.get('title', '')}\n{wr.get('content', '')}",
+            "filename": "web_search",
+            "source": wr.get("url", ""),
+            "rrf_score": web_score,
+            "chunk_type": "web",
+        })
+    return out
+
+
+def _gate_score(query, chunks, config):
+    """Escalation/abstention gate: a semantic relevance score in [0, 1].
+
+    Uses the cross-encoder reranker (FlashRank): fast, deterministic and
+    discriminating (relevant top chunk ~0.7-0.9, off-topic ~0.0). It replaces
+    the old rank-based lexical heuristic, which saturated near 0.8 for every
+    query and defeated escalation. Reorders chunks in place so the best evidence
+    leads answer generation.
+    """
+    if not chunks:
+        return 0.0
+    ranked = rerank_chunks(query, chunks, top_k=len(chunks))
+    scored = [c for c in (ranked or []) if isinstance(c, dict) and "rerank_score" in c]
+    if not scored:
+        # Reranker unavailable (e.g. flashrank not installed): degrade to the
+        # lexical heuristic rather than abstaining on every query.
+        return compute_retrieval_confidence(chunks)
+    chunks[:] = ranked
+    top = max((float(c.get("rerank_score", 0) or 0) for c in scored), default=0.0)
+    print(f"[GATE] relevance {top:.3f}")
+    return top
+
+
+def _print_rag_only(chunks, config):
+    """Print retrieved documents without invoking the LLM (--rag-only)."""
+    print("\n=== Retrieved Documents ===\n")
+    for i, chunk in enumerate(chunks[:config["top_k"]], 1):
+        filename = chunk.get("filename", "unknown")
+        text = chunk.get("text", "")[:300]
+        score = chunk.get("rrf_score", 0)
+        sparse = chunk.get("sparse_model", "")
+        sparse_tag = f" [sparse: {sparse}]" if sparse else ""
+        print(f"[{i}] {filename} (score: {score:.3f}){sparse_tag}")
+        print(f"    {text}...")
+        print()
+
 
 def main(query):
     """Main query entry point."""
@@ -4172,234 +4352,106 @@ def main(query):
             elif verbose:
                 print("[MEMORY] Skipping irrelevant context")
     
-    # Query enhancement
-    hyde_embedding = None
-    enhanced_queries = [query]
-    
-    if config["query_classification_enabled"]:
-        query_type = classify_query(query)
-        if verbose:
-            print(f"[CLASSIFY] Type: {query_type}")
-    
-    # multipass: Multi-pass retrieval - collect all query variants
-    if config["multipass_enabled"]:
-        if verbose:
-            print("[MULTIPASS] Collecting query variants...")
-        
-        # Collect variants using multipass functions
-        enhanced_queries = collect_query_variants(query, config)
-        
-        if verbose:
-            print(f"[MULTIPASS] Variants ({len(enhanced_queries)}):")
-            for i, v in enumerate(enhanced_queries[:5]):
-                print(f"  [{i+1}] {v[:80]}...")
-    else:
-        # Legacy query enhancement path
-        if config["hyde_enabled"]:
-            if verbose:
-                print("[HYDE] Generating hypothetical document...")
-            hyde_doc = generate_hyde_document(query)
-            if hyde_doc and hyde_doc != query:
-                hyde_embedding = get_embedding(hyde_doc)
-                if verbose:
-                    print(f"[HYDE] Generated: {hyde_doc[:100]}...")
-        
-        # multipass: Hypothetical title (standalone, not in multipass)
-        if config["hypothetical_title_enabled"]:
-            hypo_title = generate_hypothetical_title(query)
-            if hypo_title and hypo_title != query:
-                enhanced_queries.append(hypo_title)
-                if verbose:
-                    print(f"[HYPO_TITLE] {hypo_title[:80]}...")
-        
-        # multipass: Query rewrite variants (standalone, not in multipass)
-        if config["query_rewrite_enabled"]:
-            rewrites = rewrite_query_multi(query, 3)
-            for rw in rewrites:
-                if rw and rw != query and rw not in enhanced_queries:
-                    enhanced_queries.append(rw)
-            if verbose:
-                print(f"[REWRITE] Generated {len(rewrites)} variants")
-        
-        if config["stepback_enabled"]:
-            stepback = generate_stepback_query(query)
-            if stepback and stepback != query:
-                enhanced_queries.append(stepback)
-                if verbose:
-                    print(f"[STEPBACK] {stepback}")
-        
-        if config["subquery_enabled"]:
-            subqueries = decompose_query(query)
-            enhanced_queries.extend(subqueries)
-            if verbose:
-                print(f"[SUBQUERY] {subqueries}")
-    
-    # HyDE embedding for primary query (used in both paths)
-    if config["hyde_enabled"] and hyde_embedding is None:
-        hyde_doc = generate_hyde_document(query)
-        if hyde_doc and hyde_doc != query:
-            hyde_embedding = get_embedding(hyde_doc)
-            if verbose:
-                print(f"[HYDE] Generated: {hyde_doc[:100]}...")
-    
-    # Retrieval
-    if verbose:
-        print("[RETRIEVAL] Searching...")
-    
-    all_chunks = []
-    
-    # multipass: Multi-pass ensemble retrieval
-    if config["multipass_enabled"]:
-        # Use top 3 variants for ensemble search
-        max_variants = min(config["multipass_variants"], len(enhanced_queries))
-        if verbose:
-            print(f"[MULTIPASS] Searching with {max_variants} variants...")
-        
-        for i, eq in enumerate(enhanced_queries[:max_variants]):
-            chunks = hybrid_search(
-                eq, 
-                top_k=3,  # Fewer per variant, more variants
-                hyde_embedding=hyde_embedding if i == 0 else None
-            )
-            all_chunks.extend(chunks)
-            if verbose:
-                print(f"  [{i+1}] {len(chunks)} results")
-        
-        # Multipass ALWAYS reranks the ensemble
-        if verbose:
-            print(f"[MULTIPASS] Reranking ensemble of {len(all_chunks)} chunks...")
-    else:
-        # Legacy retrieval path
-        for eq in enhanced_queries[:3]:  # Limit subqueries
-            chunks = hybrid_search(
-                eq, 
-                top_k=config["top_k"], 
-                hyde_embedding=hyde_embedding if eq == query else None
-            )
-            all_chunks.extend(chunks)
-    
-    # Deduplicate by ID
-    seen_ids = set()
-    unique_chunks = []
-    for chunk in all_chunks:
-        chunk_id = chunk.get("id")
-        if chunk_id not in seen_ids:
-            seen_ids.add(chunk_id)
-            unique_chunks.append(chunk)
-    
-    # multipass: For multipass, rerank before limiting
-    if config["multipass_enabled"] and len(unique_chunks) > config["top_k"]:
-        unique_chunks = rerank_chunks(query, unique_chunks, top_k=config["rerank_top_k"])
-        if verbose:
-            print(f"[MULTIPASS] After rerank: {len(unique_chunks)} chunks")
-    
-    chunks = unique_chunks[:config["top_k"] * 2]
-    
-    if verbose:
-        print(f"[RETRIEVAL] Found {len(chunks)} unique chunks")
-    
-    if not chunks:
-        print("No relevant documents found.")
-        return
-    
-    # RAG-only mode
-    if rag_only:
-        print("\n=== Retrieved Documents ===\n")
-        for i, chunk in enumerate(chunks[:config["top_k"]], 1):
-            filename = chunk.get("filename", "unknown")
-            text = chunk.get("text", "")[:300]
-            score = chunk.get("rrf_score", 0)
-            sparse = chunk.get("sparse_model", "")
-            sparse_tag = f" [sparse: {sparse}]" if sparse else ""
-            print(f"[{i}] {filename} (score: {score:.3f}){sparse_tag}")
-            print(f"    {text}...")
-            print()
-        return
-    
-    # Post-retrieval processing
-    if config["rerank_enabled"]:
-        if verbose:
-            print("[RERANK] Reranking chunks...")
-        chunks = rerank_chunks(query, chunks, top_k=config["rerank_top_k"])
-    
-    if config["diversity_filter_enabled"]:
-        chunks = apply_diversity_filter(chunks, config["diversity_threshold"])
-    
-    if config["context_window_enabled"]:
-        chunks = expand_context_window(chunks, config["context_window_size"])
-    
-    if config["rse_enabled"]:
-        chunks = apply_rse(query, chunks)
-    
-    # Compute retrieval confidence BEFORE CRAG decision
-    retrieval_confidence = compute_retrieval_confidence(chunks)
-    
-    if verbose:
-        print(f"[QUALITY] Initial confidence: {retrieval_confidence:.2f}")
-    
-    # CRAG: trigger web search if confidence is below threshold
+    # ------------------------------------------------------------------
+    # Retrieval with adaptive escalation.
+    #
+    # Non-adaptive (pinned) modes run a single retrieval honoring the flags,
+    # with the legacy CRAG web fallback. Adaptive mode (the default set by
+    # query.sh) starts cheap and escalates only while retrieval confidence
+    # stays below ESCALATE_CONFIDENCE_MIN, keeping the best result at each step:
+    #   tier 0: rag  ->  tier 1: +multi-pass  ->  tier 2: +web  ->  tier 3: full
+    # ------------------------------------------------------------------
+    adaptive = config["adaptive_enabled"]
+    esc = config["escalate_threshold"]
+    max_tier = config["max_tier"]
     web_results = []
-    if config["crag_enabled"] and not config["web_search_enabled"]:
-        if verbose:
-            print("[CRAG] Enabled but WEB_SEARCH_ENABLED=false; skipping web fallback")
-    if config["crag_enabled"] and config["web_search_enabled"]:
-        crag_threshold = config.get("crag_threshold", 0.4)
 
-        if retrieval_confidence < crag_threshold:
-            if verbose:
-                print(f"[CRAG] Low confidence ({retrieval_confidence:.2f} < {crag_threshold}), triggering web search...")
-            
-            from web_search import search_web
-            web_results = search_web(query, max_results=3)
-            
-            if verbose:
-                print(f"[CRAG] Web search returned {len(web_results)} results")
-                for wr in web_results[:3]:
-                    title = wr.get("title", "")[:60]
-                    url = wr.get("url", "")[:80]
-                    engine = wr.get("engine", "unknown")
-                    print(f"  - [{engine}] {title}")
-                    print(f"    {url}")
-        else:
-            if verbose:
-                print(f"[CRAG] Confidence sufficient ({retrieval_confidence:.2f} >= {crag_threshold}), skipping web search")
-    
-    # Add web results as synthetic chunks for answer generation
-    if web_results:
-        # Score web chunks on the same scale as the retrieved RAG chunks. A
-        # fixed value (e.g. 0.5) collides with the score-type detection in
-        # compute_retrieval_confidence and flips its normalization regime,
-        # making the recomputed confidence meaningless. Treat web chunks as
-        # being as relevant as the best local chunk (fetched for this query).
-        rag_scores = [
-            float(c.get("rerank_score") or c.get("rrf_score") or 0)
-            for c in chunks if isinstance(c, dict)
-        ]
-        web_score = max(rag_scores) if rag_scores else 0.5
-        for i, wr in enumerate(web_results):
-            web_chunk = {
-                "id": f"web_{i}",
-                "text": f"{wr.get('title', '')}\n{wr.get('content', '')}",
-                "filename": "web_search",
-                "source": wr.get("url", ""),
-                "rrf_score": web_score,
-                "chunk_type": "web",
-            }
-            chunks.append(web_chunk)
+    if not adaptive:
+        # Single pass honoring the flags exactly (legacy behaviour).
         if verbose:
-            print(f"[CRAG] Added {len(web_results)} web chunks to context")
-
-        # Recalculate confidence (now on a consistent score scale), then apply a
-        # small boost to reflect the added external grounding.
+            print("[RETRIEVAL] Searching...")
+        chunks = _retrieve(query, config, verbose)
+        if not chunks:
+            print("No relevant documents found.")
+            return
+        if rag_only:
+            _print_rag_only(chunks, config)
+            return
         retrieval_confidence = compute_retrieval_confidence(chunks)
-        retrieval_confidence = min(1.0, retrieval_confidence + 0.15)
         if verbose:
-            print(f"[QUALITY] Confidence after web boost: {retrieval_confidence:.2f}")
+            print(f"[QUALITY] Initial confidence: {retrieval_confidence:.2f}")
+
+        # Legacy CRAG web fallback
+        if config["crag_enabled"] and not config["web_search_enabled"] and verbose:
+            print("[CRAG] Enabled but WEB_SEARCH_ENABLED=false; skipping web fallback")
+        if config["crag_enabled"] and config["web_search_enabled"]:
+            crag_threshold = config.get("crag_threshold", 0.4)
+            if retrieval_confidence < crag_threshold:
+                if verbose:
+                    print(f"[CRAG] Low confidence ({retrieval_confidence:.2f} < {crag_threshold}), triggering web search...")
+                web_results = _web_search(query, verbose)
+                if web_results:
+                    chunks = _add_web_chunks(chunks, web_results)
+                    retrieval_confidence = min(1.0, compute_retrieval_confidence(chunks) + 0.15)
+                    if verbose:
+                        print(f"[QUALITY] Confidence after web boost: {retrieval_confidence:.2f}")
+            elif verbose:
+                print(f"[CRAG] Confidence sufficient ({retrieval_confidence:.2f} >= {crag_threshold}), skipping web search")
+    else:
+        # Tier 0: plain RAG
+        base_cfg = {**config, "multipass_enabled": False, "hyde_enabled": False, "rerank_enabled": False}
+        chunks = _retrieve(query, base_cfg, verbose)
+        if not chunks:
+            print("No relevant documents found.")
+            return
+        if rag_only:
+            _print_rag_only(chunks, config)
+            return
+        retrieval_confidence = _gate_score(query, chunks, config)
+        tier_used = "rag"
+        print(f"[ADAPTIVE] Tier 0 (rag): score {retrieval_confidence:.2f}")
+
+        # Tier 1: multi-pass retrieval
+        if retrieval_confidence < esc and max_tier >= 1:
+            print("[ADAPTIVE] Escalating -> tier 1 (multi-pass)")
+            mp_cfg = {**config, "multipass_enabled": True, "rerank_enabled": True, "hyde_enabled": False}
+            mp_chunks = _retrieve(query, mp_cfg, verbose)
+            mp_conf = _gate_score(query, mp_chunks, config) if mp_chunks else -1
+            if mp_conf >= retrieval_confidence:
+                chunks, retrieval_confidence, tier_used = mp_chunks, mp_conf, "rag+multipass"
+            print(f"[ADAPTIVE] Tier 1 (multi-pass): score {retrieval_confidence:.2f}")
+
+        # Tier 2: web fallback (keep-best: web noise must never degrade the answer)
+        if retrieval_confidence < esc and max_tier >= 2 and config["web_search_enabled"]:
+            print("[ADAPTIVE] Escalating -> tier 2 (web search)")
+            web_results = _web_search(query, verbose)
+            if web_results:
+                cand = _add_web_chunks(chunks, web_results)
+                cand_conf = _gate_score(query, cand, config)
+                if cand_conf >= retrieval_confidence:
+                    chunks, retrieval_confidence, tier_used = cand, cand_conf, tier_used + "+web"
+            print(f"[ADAPTIVE] Tier 2 (web): score {retrieval_confidence:.2f}")
+
+        # Tier 3: full retrieval (multi-pass + HyDE + rerank), keep-best.
+        # Web chunks, if they helped, are already preserved in `chunks` above.
+        if retrieval_confidence < esc and max_tier >= 3:
+            print("[ADAPTIVE] Escalating -> tier 3 (full)")
+            full_cfg = {**config, "multipass_enabled": True, "hyde_enabled": True, "rerank_enabled": True}
+            full_chunks = _retrieve(query, full_cfg, verbose)
+            full_conf = _gate_score(query, full_chunks, config) if full_chunks else -1
+            if full_conf >= retrieval_confidence:
+                chunks, retrieval_confidence, tier_used = full_chunks, full_conf, "full"
+            print(f"[ADAPTIVE] Tier 3 (full): score {retrieval_confidence:.2f}")
+
+        print(f"[ADAPTIVE] Answer tier: {tier_used} (score {retrieval_confidence:.2f})")
     
-    # Abstention check
-    if config["abstention_enabled"] and retrieval_confidence < config["confidence_threshold"]:
+    # Abstention check. Adaptive mode gates on the reranker score, so it uses the
+    # low abstention_floor (answer whenever a minimally relevant chunk exists);
+    # pinned modes keep the legacy heuristic threshold.
+    abstain_min = config["abstention_floor"] if adaptive else config["confidence_threshold"]
+    if config["abstention_enabled"] and retrieval_confidence < abstain_min:
         if verbose:
-            print(f"[QUALITY] Low confidence ({retrieval_confidence:.2f}), abstaining")
+            print(f"[QUALITY] Low relevance ({retrieval_confidence:.2f} < {abstain_min}), abstaining")
         
         # Log to ledger
         if config["quality_ledger_enabled"]:
@@ -4525,6 +4577,7 @@ export CRAG_ENABLED CRAG_THRESHOLD
 export RERANK_ENABLED RELEVANCE_THRESHOLD
 export SPELLCHECK_ENABLED QUERY_NORMALIZE_ENABLED SPELLCHECK_WHITELIST_FILE
 export DEBUG VERBOSE
+export ADAPTIVE_ENABLED MAX_TIER ESCALATE_CONFIDENCE_MIN
 
 # Default settings
 MODE="default"
@@ -4538,14 +4591,17 @@ while [[ $# -gt 0 ]]; do
             MODE="rag-only"
             export HYDE_ENABLED=false CRAG_ENABLED=false RERANK_ENABLED=false
             export MEMORY_ENABLED=false QUERY_CACHE_ENABLED=true
+            export ADAPTIVE_ENABLED=false
             shift ;;
         --web-only)
             MODE="web-only"
+            export ADAPTIVE_ENABLED=false
             shift ;;
         --ultrafast)
             MODE="ultrafast"
             export HYDE_ENABLED=false CRAG_ENABLED=false RERANK_ENABLED=false
             export MULTIPASS_ENABLED=false STEPBACK_ENABLED=false
+            export ADAPTIVE_ENABLED=false
             export NUM_PREDICT=${NUM_PREDICT_ULTRAFAST:-400}
             export LLM_TIMEOUT=${LLM_TIMEOUT_ULTRAFAST:-90}
             shift ;;
@@ -4554,12 +4610,22 @@ while [[ $# -gt 0 ]]; do
             export HYDE_ENABLED=true CRAG_ENABLED=true RERANK_ENABLED=true
             export MULTIPASS_ENABLED=true CITATIONS_ENABLED=true
             export HYPOTHETICAL_TITLE_ENABLED=true QUERY_REWRITE_ENABLED=true
+            export ADAPTIVE_ENABLED=false
             export NUM_PREDICT=${NUM_PREDICT_FULL:-1200}
             export LLM_TIMEOUT=${LLM_TIMEOUT_FULL:-0}
             shift ;;
         --debug) DEBUG_FLAG="--debug"; export DEBUG=true VERBOSE=true; shift ;;
         --multipass) export MULTIPASS_ENABLED=true; shift ;;
         --citations) export CITATIONS_ENABLED=true; shift ;;
+        --no-adaptive) export ADAPTIVE_ENABLED=false; shift ;;
+        --max-tier)
+            shift
+            if ! [[ "${1:-}" =~ ^[0-3]$ ]]; then
+                echo "Error: --max-tier requires a value 0-3 (got '${1:-}')" >&2
+                exit 2
+            fi
+            export MAX_TIER="$1"
+            shift ;;
         --no-memory) export MEMORY_ENABLED=false; shift ;;
         --no-cache) export QUERY_CACHE_ENABLED=false; shift ;;
         --clear-cache)
@@ -4587,16 +4653,18 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: ./query.sh [options] 'question'"
             echo ""
             echo "Modes:"
-            echo "  (default)     Hybrid search + LLM (~60-90s)"
+            echo "  (default)     Adaptive cascade: cache -> rag -> multipass -> web -> full"
             echo "  --rag-only    Retrieval only, no LLM (<1s)"
             echo "  --web-only    Web search bypass RAG (~30s)"
-            echo "  --ultrafast   Minimal features (~30-45s)"
-            echo "  --full        All features + CRAG (~3-5min)"
+            echo "  --ultrafast   Minimal features, single pass (~30-45s)"
+            echo "  --full        All features + CRAG, single pass (~3-5min)"
             echo ""
             echo "Options:"
             echo "  --debug       Show debug output"
             echo "  --multipass   Enable multi-pass retrieval"
-            echo "  --citations   Enable source citations"
+            echo "  --citations   Enable source citations (adds a Sources list)"
+            echo "  --no-adaptive Disable the cascade (single pass in default mode)"
+            echo "  --max-tier N  Cap escalation: 0=rag 1=+multipass 2=+web 3=full"
             echo "  --no-memory   Disable conversation memory"
             echo "  --no-cache    Disable query cache"
             echo "  --clear-cache Clear the query cache"
@@ -4606,6 +4674,10 @@ while [[ $# -gt 0 ]]; do
             echo "  --whitelist-show      Show current whitelist"
             echo "  --whitelist-auto      Auto-populate from indexed docs"
             exit 0 ;;
+        --*)
+            echo "Error: unknown option '$1'" >&2
+            echo "Try: ./query.sh --help" >&2
+            exit 2 ;;
         *)
             EXTRA_ARGS="$EXTRA_ARGS $1"
             shift ;;
@@ -4614,11 +4686,14 @@ done
 
 QUERY=$(echo "$EXTRA_ARGS" | sed 's/^ *//')
 
-# Mapping mode -> tier LLM (pilote la selection du modele dans llm_helper.py)
+# Mapping mode -> tier LLM (pilote la selection du modele dans llm_helper.py).
+# The default mode runs the adaptive cascade (rag -> multipass -> web -> full),
+# unless the caller pinned a mode or passed --no-adaptive.
 case $MODE in
     ultrafast) export QUERY_MODE_ACTIVE=quick ;;
     full)      export QUERY_MODE_ACTIVE=deep ;;
-    *)         export QUERY_MODE_ACTIVE=default ;;
+    *)         export QUERY_MODE_ACTIVE=default
+               export ADAPTIVE_ENABLED=${ADAPTIVE_ENABLED:-true} ;;
 esac
 
 if [ -z "$QUERY" ]; then
@@ -4761,34 +4836,8 @@ EOFTIERED
 chmod +x "$PROJECT_DIR/query-tiered-cache.sh"
 log_ok "query-tiered-cache.sh"
 
-# ============================================================================
-# Create evaluate.sh
-# ============================================================================
-log_info "Creating evaluate.sh..."
-cat > "$PROJECT_DIR/evaluate.sh" << 'EOFEVAL'
-#!/bin/bash
-# RAG Quality Evaluation web
-cd "$(dirname "$0")"
-set -a; source ./config.env 2>/dev/null || true; set +a
-
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --query|-q) python3 ./lib/ragas_eval.py --query "$2"; exit $?; shift 2 ;;
-        --generate|-g) python3 ./lib/ragas_eval.py --generate "${2:-10}"; exit $?; shift 2 ;;
-        --report|-r) python3 ./lib/ragas_eval.py --evaluate "${RAGAS_DATASET_PATH:-./cache/ragas_test.json}"; exit $?; shift ;;
-        --help|-h)
-            echo "Usage: ./evaluate.sh [options]"
-            echo "  --query TEXT    Evaluate single query"
-            echo "  --generate N    Generate N test questions"
-            echo "  --report        Run batch evaluation"
-            exit 0 ;;
-        *) shift ;;
-    esac
-done
-echo "Use --help for options"
-EOFEVAL
-chmod +x "$PROJECT_DIR/evaluate.sh"
-log_ok "evaluate.sh"
+# evaluate.sh is generated by setup-rag-core.sh (single source of truth).
+# The thin wrapper that used to live here was removed to avoid a dual generator.
 # ============================================================================
 # Additional utility scripts (web)
 # ============================================================================
