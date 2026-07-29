@@ -1074,6 +1074,37 @@ Rewrites:
 # ============================================================================
 # multipass: Multi-Pass Variant Collector
 # ============================================================================
+def pseudo_relevance_expand(query, top_chunk_text, max_tokens=60):
+    """Rewrite the query using identifiers found in an already-retrieved chunk.
+
+    Feature: pseudo-relevance feedback (PRF)
+    Blind HyDE/rewrite ask the LLM to imagine a document from the query alone,
+    which can't recover corpus-specific identifiers (an address, a unit code,
+    a filename convention) it has never seen. Grounding the rewrite in the
+    top-1 chunk from a cheap first pass lets the LLM copy those identifiers
+    into the query, improving recall on a second, more targeted pass -
+    without hand-listing synonyms per entity.
+    """
+    if not top_chunk_text:
+        return query
+    prompt = f"""A first search for this question returned the document snippet below, which may be related but doesn't fully answer it.
+
+Snippet:
+{top_chunk_text[:500]}
+
+Question: {query}
+
+Rewrite the question as a single, more specific search query. Reuse any specific names, addresses, codes, dates, or identifiers from the snippet that would help find the exact matching document. Output only the rewritten query, one line:"""
+
+    result = llm_generate_fast(prompt, max_tokens)
+    if not result:
+        return query
+    rewritten = result.strip().strip('"').strip("'").split('\n')[0]
+    if not _is_valid_variant(rewritten):
+        return query
+    return rewritten
+
+
 def collect_query_variants(query, config):
     """Collect all query variants for multi-pass retrieval.
     
@@ -2043,6 +2074,31 @@ def verify_grounding(answer, chunks, threshold=0.5):
     
     score = grounded_count / len(answer_sentences)
     return score, ungrounded
+
+# adaptive: generic "no answer found" detector, used to force escalation when
+# the gate score rated the chunks relevant but the LLM still couldn't answer
+# (e.g. topically-correct chunk, missing fact). Bilingual FR/EN since answers
+# are generated in either language.
+_NON_ANSWER_PATTERNS = [
+    "je ne trouve pas", "je n'ai pas trouv", "aucune information",
+    "aucune mention", "aucun renseignement", "ne mentionne pas",
+    "pas d'information", "pas de renseignement", "pas de mention",
+    "pas mention", "je ne dispose pas", "n'est pas mentionn",
+    "ne fournit pas", "ne précise pas", "ne precise pas",
+    "ne spécifie pas", "ne specifie pas", "n'indique pas",
+    "sans information", "sans renseignement", "il n'y a pas de",
+    "no information", "does not mention", "doesn't mention",
+    "not mentioned", "i cannot find", "i can't find", "i don't know",
+    "unable to find", "no mention of", "does not specify",
+    "does not provide", "does not indicate",
+]
+
+def is_non_answer(answer):
+    """True if the answer looks like a refusal / "not found in context" reply."""
+    if not answer:
+        return True
+    lowered = answer.lower()
+    return any(p in lowered for p in _NON_ANSWER_PATTERNS)
 EOFPY
 log_ok "generation.py"
 
@@ -2215,6 +2271,61 @@ def compute_answer_coverage(query, answer, chunks):
     grounding = len(answer_words & chunk_words) / max(len(answer_words), 1)
     
     return (query_coverage + grounding) / 2
+
+# adaptive: generic entity-coverage check for the escalation gate.
+#
+# The cross-encoder gate score (see query_main._gate_score) rates topical
+# relevance, but can score a chunk highly on generic phrasing overlap while
+# missing the specific entity the query names (a property address, a unit
+# code, a person). Rather than hand-listing synonyms per entity, extract the
+# query's own identifying tokens - capitalized words and digit sequences -
+# and check they actually occur in the retrieved text. This generalizes to
+# any query with a proper noun or code, not just ones we've seen fail before.
+import re
+
+_STOPWORDS_INITIAL_CAPS = {
+    "quel", "quelle", "quels", "quelles", "qui", "que", "quoi", "comment",
+    "pourquoi", "combien", "ou", "quand", "est", "sont", "le", "la", "les",
+    "un", "une", "des", "what", "who", "when", "where", "why", "how", "which",
+}
+
+def extract_entity_tokens(query):
+    """Return the set of proper-noun/number tokens that identify *this* query.
+
+    Skips the first word (sentence-initial capital is not informative) and
+    common interrogative/article words that get capitalized by mistake.
+    """
+    words = query.strip().split()
+    tokens = set()
+    for i, w in enumerate(words):
+        cleaned = re.sub(r"^[^\w]+|[^\w]+$", "", w)
+        if not cleaned:
+            continue
+        if i == 0 and cleaned[:1].isupper():
+            continue
+        if cleaned.lower() in _STOPWORDS_INITIAL_CAPS:
+            continue
+        if re.search(r"\d", cleaned):
+            tokens.add(cleaned.lower())
+        elif cleaned[:1].isupper() and len(cleaned) >= 3:
+            tokens.add(cleaned.lower())
+    return tokens
+
+def compute_entity_coverage(query, chunks, top_n=3):
+    """Fraction of the query's identifying tokens found in the top chunks.
+
+    Returns 1.0 (no penalty) when the query has no identifying tokens to
+    check, since there's nothing entity-specific to verify.
+    """
+    entities = extract_entity_tokens(query)
+    if not entities:
+        return 1.0
+    text = " ".join(
+        (c.get("text", "") if isinstance(c, dict) else str(c))
+        for c in chunks[:top_n]
+    ).lower()
+    found = sum(1 for e in entities if e in text)
+    return found / len(entities)
 EOFPY
 log_ok "quality_ledger.py"
 
@@ -4036,12 +4147,13 @@ from llm_helper import llm_generate, get_embedding, get_debug_info, reset_debug_
 from query_enhancement import (
     generate_hyde_document, generate_stepback_query, decompose_query, classify_query,
     generate_hypothetical_title, rewrite_query_multi, collect_query_variants,
-    preprocess_query  # dedup
+    preprocess_query,  # dedup
+    pseudo_relevance_expand,
 )
 from hybrid_search import hybrid_search, get_hybrid_mode
 from post_retrieval import rerank_chunks, crag_process, apply_rse, expand_context_window, apply_diversity_filter
-from generation import generate_answer, verify_grounding
-from quality_ledger import QualityLedger, compute_retrieval_confidence, compute_answer_coverage
+from generation import generate_answer, verify_grounding, is_non_answer
+from quality_ledger import QualityLedger, compute_retrieval_confidence, compute_answer_coverage, compute_entity_coverage
 from memory import ConversationMemory
 from query_cache import QueryCache
 
@@ -4252,7 +4364,18 @@ def _gate_score(query, chunks, config):
         return compute_retrieval_confidence(chunks)
     chunks[:] = ranked
     top = max((float(c.get("rerank_score", 0) or 0) for c in scored), default=0.0)
-    print(f"[GATE] relevance {top:.3f}")
+
+    # adaptive: the cross-encoder can rate a chunk "relevant" on generic
+    # topical overlap while missing the specific entity the query names (an
+    # address, a unit code, a person). Cap the score by how many of the
+    # query's own identifying tokens actually appear in the top evidence, so
+    # a topically-similar-but-wrong-entity chunk still triggers escalation.
+    entity_coverage = compute_entity_coverage(query, ranked)
+    if entity_coverage < 1.0:
+        top *= entity_coverage
+        print(f"[GATE] entity coverage {entity_coverage:.2f} -> adjusted relevance {top:.3f}")
+    else:
+        print(f"[GATE] relevance {top:.3f}")
     return top
 
 
@@ -4422,11 +4545,26 @@ def main(query):
         tier_used = "rag"
         print(f"[ADAPTIVE] Tier 0 (rag): score {retrieval_confidence:.2f}")
 
-        # Tier 1: multi-pass retrieval
+        # Tier 1: multi-pass retrieval, plus a pseudo-relevance-feedback pass
+        # that grounds a query rewrite in tier 0's own top chunk (recovers
+        # corpus identifiers - addresses, unit codes - blind HyDE can't guess).
         if retrieval_confidence < esc and max_tier >= 1:
             print("[ADAPTIVE] Escalating -> tier 1 (multi-pass)")
             mp_cfg = {**config, "multipass_enabled": True, "rerank_enabled": True, "hyde_enabled": False}
             mp_chunks = _retrieve(query, mp_cfg, verbose)
+
+            top_chunk_text = chunks[0].get("text", "") if chunks and isinstance(chunks[0], dict) else ""
+            prf_query = pseudo_relevance_expand(query, top_chunk_text)
+            if prf_query != query:
+                if verbose:
+                    print(f"[PRF] Expanded query: {prf_query[:100]}...")
+                prf_chunks = hybrid_search(prf_query, top_k=config["top_k"])
+                seen_ids = {c.get("id") for c in mp_chunks if isinstance(c, dict)}
+                for c in prf_chunks:
+                    if not isinstance(c, dict) or c.get("id") not in seen_ids:
+                        mp_chunks.append(c)
+                        seen_ids.add(c.get("id") if isinstance(c, dict) else None)
+
             mp_conf = _gate_score(query, mp_chunks, config) if mp_chunks else -1
             if mp_conf >= retrieval_confidence:
                 chunks, retrieval_confidence, tier_used = mp_chunks, mp_conf, "rag+multipass"
@@ -4483,15 +4621,50 @@ def main(query):
     if verbose:
         print("[GENERATE] Generating answer...")
     
-    answer = generate_answer(query, chunks, memory_context, {
+    gen_cfg = {
         "max_context_chars": config["max_context_chars"],
         "num_predict": config["num_predict"],
         "citations": config["citations_enabled"],
-    })
+    }
+    answer = generate_answer(query, chunks, memory_context, gen_cfg)
     
     if not answer:
         print("Failed to generate answer.")
         return
+    
+    # adaptive: the gate score only measures topical relevance, so a chunk
+    # about the right entity but missing the specific fact still passes the
+    # gate. Force one escalation to the full tier when the answer itself
+    # says nothing was found and we haven't already tried the top tier -
+    # this catches failures the gate score can't see.
+    if adaptive and is_non_answer(answer) and tier_used != "full" and max_tier >= 3:
+        if verbose:
+            print("[ADAPTIVE] Answer indicates no information found; forcing escalation to tier 3 (full)")
+        # PRF: ground the retrieval in the current top chunk's own text rather
+        # than a blind HyDE guess, which can hallucinate identifiers (wrong
+        # names/addresses) the LLM has never actually seen in the corpus.
+        top_chunk_text = chunks[0].get("text", "") if chunks and isinstance(chunks[0], dict) else ""
+        prf_query = pseudo_relevance_expand(query, top_chunk_text)
+        full_cfg = {**config, "multipass_enabled": True, "hyde_enabled": True, "rerank_enabled": True}
+        full_chunks = _retrieve(query, full_cfg, verbose)
+        if prf_query != query:
+            if verbose:
+                print(f"[PRF] Expanded query: {prf_query[:100]}...")
+            prf_chunks = hybrid_search(prf_query, top_k=config["top_k"])
+            seen_ids = {c.get("id") for c in full_chunks if isinstance(c, dict)}
+            for c in prf_chunks:
+                if not isinstance(c, dict) or c.get("id") not in seen_ids:
+                    full_chunks.append(c)
+                    seen_ids.add(c.get("id") if isinstance(c, dict) else None)
+        if full_chunks:
+            full_conf = _gate_score(query, full_chunks, config)
+            full_answer = generate_answer(query, full_chunks, memory_context, gen_cfg)
+            if full_answer and not is_non_answer(full_answer):
+                chunks, retrieval_confidence, tier_used, answer = (
+                    full_chunks, full_conf, tier_used + "+forced-full", full_answer)
+                print(f"[ADAPTIVE] Forced full retrieval recovered an answer (score {full_conf:.2f})")
+            elif verbose:
+                print("[ADAPTIVE] Forced full retrieval did not recover an answer")
     
     # Grounding check
     grounding_score = 1.0
