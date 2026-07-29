@@ -1910,6 +1910,7 @@ cat > "$PROJECT_DIR/lib/generation.py" << 'EOFPY'
 """Answer generation with optional citations and grounding"""
 import os
 import re
+from datetime import date
 from llm_helper import llm_generate
 
 def generate_answer(query, chunks, memory_context="", config=None):
@@ -1965,7 +1966,17 @@ def generate_answer(query, chunks, memory_context="", config=None):
         total_chars += len(text)
 
     context = "\n\n".join(context_parts)
-    
+
+    # Ground "currently"/"actuellement" style questions: without today's date the
+    # model can't tell a tenant who already moved out from one whose lease hasn't
+    # started yet, and tends to just answer with whichever lease chunk ranked highest.
+    today_str = date.today().strftime("%Y-%m-%d")
+    date_instruction = (
+        f" Today's date is {today_str}. If the context contains dates (e.g. lease "
+        "start/end dates, move-in/move-out dates), use them to determine what is "
+        "currently true as of today's date rather than just the most recent document."
+    )
+
     # cache: Use relaxed prompt when web results are present (CRAG triggered)
     # Small models are too cautious with strict prompts
     if web_chunks:
@@ -1976,7 +1987,7 @@ Information:
 
 Question: {query}
 
-Provide a concise, factual answer based on the information above.{lang_instruction}"""
+Provide a concise, factual answer based on the information above.{date_instruction}{lang_instruction}"""
     else:
         # Standard RAG prompt (slightly relaxed from original)
         prompt = f"""Answer the question using the document context provided below.
@@ -1986,7 +1997,7 @@ Question: {query}
 Document context:
 {context}
 
-Provide a concise answer based on the context. If the context doesn't contain relevant information, say so briefly.{lang_instruction}"""
+Provide a concise answer based on the context. If the context doesn't contain relevant information, say so briefly.{date_instruction}{lang_instruction}"""
     
     if citations_enabled:
         prompt += "\nCite sources using [1], [2], etc."
