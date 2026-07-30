@@ -30,6 +30,9 @@ cat > "$PROJECT_DIR/lib/unstructured_parser.py" << 'EOFPY'
 """Unified document parser using Unstructured.io"""
 
 import os
+import shutil
+import subprocess
+import tempfile
 
 # Suppress OpenCV/OpenGL warnings on headless systems
 os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
@@ -180,11 +183,36 @@ def parse_document(file_path, strategy="auto", ocr_languages="eng+fra"):
             "char_count": len(text_content),
         }
         return text_content, metadata
-    
+
+    # .odt goes through unstructured -> pypandoc, which resolves the source path with
+    # glob.glob() internally. Paths containing "[...]" (e.g. a "[MAISONS]" folder) get
+    # interpreted as a glob character class, match nothing, and crash with
+    # "'PosixPath' object is not iterable". Convert with soffice first to sidestep pypandoc.
+    partition_path = file_path
+    odt_temp_dir = None
+    if ext == ".odt":
+        odt_temp_dir = tempfile.mkdtemp(prefix="odt_convert_")
+        try:
+            subprocess.run(
+                ["soffice", "--headless", "--convert-to", "docx", "--outdir", odt_temp_dir, file_path],
+                capture_output=True, timeout=60, check=True,
+            )
+            converted = os.path.join(
+                odt_temp_dir, os.path.splitext(os.path.basename(file_path))[0] + ".docx"
+            )
+            if os.path.exists(converted):
+                partition_path = converted
+            else:
+                shutil.rmtree(odt_temp_dir, ignore_errors=True)
+                return "", {"error": "soffice did not produce a .docx from the .odt file", "filename": os.path.basename(file_path)}
+        except Exception as e:
+            shutil.rmtree(odt_temp_dir, ignore_errors=True)
+            return "", {"error": f"soffice odt conversion failed: {e}", "filename": os.path.basename(file_path)}
+
     try:
         # Partition document
         elements = partition(
-            filename=file_path,
+            filename=partition_path,
             strategy=strategy,
             languages=ocr_languages.split("+") if ocr_languages else None,
             include_page_breaks=True,
@@ -210,8 +238,9 @@ def parse_document(file_path, strategy="auto", ocr_languages="eng+fra"):
                 current_page += 1
                 continue
             
-            # Get text content
-            text = str(element)
+            # Get text content (element.__str__ returns self.text directly, which
+            # can be None for some OCR'd elements and crashes str(element))
+            text = getattr(element, "text", None) or ""
             if not text.strip():
                 continue
             
@@ -233,9 +262,12 @@ def parse_document(file_path, strategy="auto", ocr_languages="eng+fra"):
         metadata["char_count"] = len(result_text)
         
         return result_text, metadata
-        
+
     except Exception as e:
         return "", {"error": str(e), "filename": os.path.basename(file_path)}
+    finally:
+        if odt_temp_dir:
+            shutil.rmtree(odt_temp_dir, ignore_errors=True)
 
 def get_supported_extensions():
     """Return list of supported file extensions"""
@@ -2894,6 +2926,7 @@ import os
 import sys
 import json
 import hashlib
+import re
 import time
 
 # Suppress OpenCV/OpenGL warnings on headless systems
@@ -2938,6 +2971,19 @@ from doc_dedup import (
     mark_doc_ingested,
     get_doc_index_stats,
 )
+
+# title: filenames often carry identifying info that never appears in the body
+# text itself (e.g. a filename naming a person, date, or location). That info
+# lives only in Qdrant payload metadata otherwise, so it's invisible to
+# embeddings and to the LLM unless --citations is passed - and even then the
+# model won't reliably treat a bracketed filename as a factual claim.
+# Baking a readable title into the chunk text makes it real, searchable content.
+def derive_filename_title(filename):
+    """Turn a filename into a readable title line (strip extension, normalize separators)."""
+    name = os.path.splitext(filename)[0]
+    name = re.sub(r'[_\-]+', ' ', name).strip()
+    name = re.sub(r'\s+', ' ', name)
+    return name
 
 def _int_env(key, default):
     """int() an env var, tolerating a missing/blank/invalid value."""
@@ -3034,7 +3080,16 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
     
     if not chunks:
         return {"status": "empty", "filename": filename}
-    
+
+    # title: prepend a readable title line derived from the filename to every
+    # chunk's text, so identifying info that only lives in the filename (names,
+    # addresses, etc.) becomes real embedded/retrievable/promptable content.
+    title = derive_filename_title(filename)
+    if title:
+        for c in chunks:
+            c["text"] = f"[Document : {title}]\n\n{c['text']}"
+            c["char_count"] = len(c["text"])
+
     # Ensure collection exists (hybrid: hybrid collection with named vectors)
     dimension = get_embedding_dimension()
     use_sparse = sparse_enabled and is_sparse_embed_available()

@@ -527,7 +527,17 @@ if command -v apt-get &> /dev/null; then
     # profiling: Added antiword for legacy .doc file support
     # Microsoft Word 97-2003 format still common in enterprise archives
     apt-get install -y -qq antiword 2>/dev/null || true
-    
+
+    # unstructured's .doc/.ppt partitioner shells out to `soffice` (LibreOffice) to convert
+    # to .docx/.pptx first - antiword alone does not cover this path and .doc ingestion
+    # fails with "soffice command was not found" without it.
+    apt-get install -y -qq libreoffice-writer 2>/dev/null || true
+
+    # unstructured's .odt partitioner uses pypandoc, which requires the `pandoc` binary -
+    # without it, .odt ingestion fails (and does so with a confusing pypandoc internal
+    # error rather than a clear "pandoc not found" message).
+    apt-get install -y -qq pandoc 2>/dev/null || true
+
     apt-get install -y -qq libgl1 libgl1-mesa-dri libegl1 2>/dev/null || true
 fi
 log_ok "System dependencies installed"
@@ -921,6 +931,10 @@ echo -n "Tesseract FR: "
 tesseract --list-langs 2>/dev/null | grep -q "fra" && echo -e "${G}OK${N}" || echo -e "${Y}Missing${N}"
 echo -n "Antiword: "
 command -v antiword &>/dev/null && echo -e "${G}OK${N}" || echo -e "${Y}Missing${N}"
+echo -n "LibreOffice (soffice, .doc/.ppt conversion): "
+command -v soffice &>/dev/null && echo -e "${G}OK${N}" || echo -e "${Y}Missing${N}"
+echo -n "Pandoc (.odt/.ods/.odp conversion): "
+command -v pandoc &>/dev/null && echo -e "${G}OK${N}" || echo -e "${Y}Missing${N}"
 
 echo ""
 echo "=== Commands ==="
