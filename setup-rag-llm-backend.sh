@@ -323,6 +323,24 @@ models:
   "rag-embed":
     cmd: /usr/local/bin/llama-server -m ${MODELS_DIR}/${FILE_EMB} --embeddings --pooling cls -c 512 --host 127.0.0.1 --port \${PORT} -t ${NPROC}
     ttl: 600
+
+# rag-embed est un repli dormant (FastEmbed tourne en local et reste primaire ;
+# rag-embed n'est sollicite que si FastEmbed devient indisponible). L'isoler
+# dans son propre groupe evite que ce repli rare n'evince un modele de chat
+# actif, et inversement.
+groups:
+  chat:
+    swap: true
+    exclusive: true
+    members:
+      - "rag-quick"
+      - "rag-default"
+      - "rag-deep"
+  embed:
+    swap: false
+    exclusive: false
+    members:
+      - "rag-embed"
 YAML
 log_ok "llama-swap.yaml genere (tiers : quick=${M_QUICK}, default=${M_DEFAULT}, deep=${M_DEEP})."
 
