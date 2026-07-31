@@ -1205,22 +1205,22 @@ def bm25_search(query, top_k=10):
     except Exception as e:
         return []
 
-def vector_search(query_or_embedding, top_k=10):
+def vector_search(query_or_embedding, top_k=10, collection=None):
     """Dense vector search in Qdrant"""
     debug = os.environ.get("DEBUG", "false").lower() == "true"
-    
+
     if isinstance(query_or_embedding, str):
         embedding = get_embedding(query_or_embedding)
     else:
         embedding = query_or_embedding
-    
+
     if not embedding:
         if debug:
             print("  [VECTOR] No embedding generated")
         return []
-    
+
     qdrant = os.environ.get("QDRANT_HOST", "http://localhost:6333")
-    collection = os.environ.get("COLLECTION_NAME", "documents")
+    collection = collection or os.environ.get("COLLECTION_NAME", "documents")
     
     try:
         resp = requests.post(
@@ -1245,14 +1245,14 @@ def vector_search(query_or_embedding, top_k=10):
             print(f"  [VECTOR] Exception: {e}")
     return []
 
-def fetch_payloads(doc_ids):
+def fetch_payloads(doc_ids, collection=None):
     """Fetch payloads for document IDs from Qdrant"""
     if not doc_ids:
         return {}
-    
+
     debug = os.environ.get("DEBUG", "false").lower() == "true"
     qdrant = os.environ.get("QDRANT_HOST", "http://localhost:6333")
-    collection = os.environ.get("COLLECTION_NAME", "documents")
+    collection = collection or os.environ.get("COLLECTION_NAME", "documents")
     
     payloads = {}
     try:
@@ -1275,15 +1275,15 @@ def fetch_payloads(doc_ids):
     
     return payloads
 
-def hybrid_search(query, top_k=5, alpha=0.5, hyde_embedding=None):
+def hybrid_search(query, top_k=5, alpha=0.5, hyde_embedding=None, collection=None):
     """Combine BM25 and vector search using Reciprocal Rank Fusion."""
     debug = os.environ.get("DEBUG", "false").lower() == "true"
     k = 60
-    
+
     if hyde_embedding is not None:
-        vector_results = vector_search(hyde_embedding, top_k * 2)
+        vector_results = vector_search(hyde_embedding, top_k * 2, collection)
     else:
-        vector_results = vector_search(query, top_k * 2)
+        vector_results = vector_search(query, top_k * 2, collection)
     
     if debug:
         print(f"  [HYBRID] Vector search returned {len(vector_results)} results")
@@ -1316,7 +1316,7 @@ def hybrid_search(query, top_k=5, alpha=0.5, hyde_embedding=None):
             bm25_ids_to_fetch.add(doc_id)
     
     if bm25_ids_to_fetch:
-        fetched = fetch_payloads(bm25_ids_to_fetch)
+        fetched = fetch_payloads(bm25_ids_to_fetch, collection)
         payloads.update(fetched)
     
     # Filename boosting
@@ -1433,9 +1433,10 @@ def _is_client_available():
     except ImportError:
         return False
 
-def _hybrid_search_client(query, top_k=5, hyde_embedding=None):
+def _hybrid_search_client(query, top_k=5, hyde_embedding=None, collection=None):
     """Native Qdrant hybrid search using QdrantClient with prefetch + RRF"""
     config = _get_hybrid_config()
+    collection_name = collection or config["collection"]
     debug = os.environ.get("DEBUG", "false").lower() == "true"
     
     try:
@@ -1498,7 +1499,7 @@ def _hybrid_search_client(query, top_k=5, hyde_embedding=None):
         
         # Execute hybrid query with RRF fusion
         results = client.query_points(
-            collection_name=config["collection"],
+            collection_name=collection_name,
             prefetch=prefetch,
             query=models.FusionQuery(fusion=models.Fusion.RRF),
             limit=top_k,
@@ -1533,9 +1534,10 @@ def _hybrid_search_client(query, top_k=5, hyde_embedding=None):
             print(f"  [HYBRID] Client error: {e}")
         return None
 
-def _hybrid_search_http(query, top_k=5, hyde_embedding=None):
+def _hybrid_search_http(query, top_k=5, hyde_embedding=None, collection=None):
     """Native Qdrant hybrid search using HTTP API with prefetch + RRF"""
     config = _get_hybrid_config()
+    collection_name = collection or config["collection"]
     debug = os.environ.get("DEBUG", "false").lower() == "true"
     
     # Get embeddings
@@ -1576,7 +1578,7 @@ def _hybrid_search_http(query, top_k=5, hyde_embedding=None):
             print(f"  [HYBRID] Sparse unavailable, dense-only search")
     
     try:
-        url = f"{config['host']}/collections/{config['collection']}/points/query"
+        url = f"{config['host']}/collections/{collection_name}/points/query"
         resp = requests.post(
             url,
             json={
@@ -1624,40 +1626,88 @@ def _hybrid_search_http(query, top_k=5, hyde_embedding=None):
             print(f"  [HYBRID] HTTP error: {e}")
         return None
 
-def hybrid_search(query, top_k=5, alpha=0.5, hyde_embedding=None):
+def hybrid_search(query, top_k=5, alpha=0.5, hyde_embedding=None, collection=None):
     """Hybrid search with native Qdrant RRF or legacy fallback
-    
+
     Args:
         query: Search query
         top_k: Number of results
         alpha: Legacy RRF alpha (ignored in native mode)
         hyde_embedding: Optional HyDE embedding
-    
+        collection: Optional collection name override (defaults to COLLECTION_NAME)
+
     Returns:
         list: Search results with rrf_score, text, metadata
     """
     config = _get_hybrid_config()
     debug = os.environ.get("DEBUG", "false").lower() == "true"
-    
+
     # Check if native mode is enabled
     if config["sparse_enabled"] and config["hybrid_mode"] == "native":
         # Try client first
         if _is_client_available():
-            results = _hybrid_search_client(query, top_k, hyde_embedding)
+            results = _hybrid_search_client(query, top_k, hyde_embedding, collection)
             if results is not None:
                 return results
-        
+
         # Fallback to HTTP
-        results = _hybrid_search_http(query, top_k, hyde_embedding)
+        results = _hybrid_search_http(query, top_k, hyde_embedding, collection)
         if results is not None:
             return results
-        
+
         if debug:
             print("  [HYBRID] Native search failed, falling back to legacy")
-    
+
     # Legacy fallback
     from hybrid_search_legacy import hybrid_search as legacy_search
-    return legacy_search(query, top_k, alpha, hyde_embedding)
+    return legacy_search(query, top_k, alpha, hyde_embedding, collection)
+
+def hybrid_search_all_collections(query, top_k=5, alpha=0.5, hyde_embedding=None, base_collection=None):
+    """Fan out hybrid search across every collection for this dataset (one per
+    top-level documents folder), merge results, and keep only the top_k best
+    by rrf_score. Used for the "no --source given" first-level query tier.
+
+    Args:
+        query: Search query
+        top_k: Number of results to keep after merging
+        alpha: Legacy RRF alpha (ignored in native mode)
+        hyde_embedding: Optional HyDE embedding
+        base_collection: Base collection name (defaults to COLLECTION_NAME)
+
+    Returns:
+        list: Merged, best-scoring search results with rrf_score, text, metadata
+    """
+    from collection_utils import list_ingest_collections
+    from qdrant_client_helper import get_client
+
+    config = _get_hybrid_config()
+    base_collection = base_collection or config["collection"]
+    debug = os.environ.get("DEBUG", "false").lower() == "true"
+
+    client, _mode = get_client()
+    collections = list_ingest_collections(client, base_collection) if client else [base_collection]
+
+    if debug:
+        print(f"  [HYBRID] Fanning out across collections: {', '.join(collections)}")
+
+    merged = []
+    for name in collections:
+        try:
+            results = hybrid_search(query, top_k, alpha, hyde_embedding, collection=name)
+        except Exception as e:
+            if debug:
+                print(f"  [HYBRID] Skipping collection {name}: {e}")
+            continue
+        for r in results or []:
+            r["collection"] = name
+        merged.extend(results or [])
+
+    merged.sort(key=lambda r: r.get("rrf_score", 0), reverse=True)
+
+    if debug:
+        print(f"  [HYBRID] Merged {len(merged)} results across {len(collections)} collection(s), keeping top {top_k}")
+
+    return merged[:top_k]
 
 def get_hybrid_mode():
     """Get current hybrid search mode"""
@@ -1999,13 +2049,13 @@ def generate_answer(query, chunks, memory_context="", config=None):
     context = "\n\n".join(context_parts)
 
     # Ground "currently"/"actuellement" style questions: without today's date the
-    # model can't tell a tenant who already moved out from one whose lease hasn't
-    # started yet, and tends to just answer with whichever lease chunk ranked highest.
+    # model can't tell an expired record from one that hasn't taken effect yet,
+    # and tends to just answer with whichever chunk ranked highest.
     today_str = date.today().strftime("%Y-%m-%d")
     date_instruction = (
-        f" Today's date is {today_str}. If the context contains dates (e.g. lease "
-        "start/end dates, move-in/move-out dates), use them to determine what is "
-        "currently true as of today's date rather than just the most recent document."
+        f" Today's date is {today_str}. If the context contains start/end or "
+        "effective dates, use them to determine what is currently true as of "
+        "today's date rather than just the most recent document."
     )
 
     # cache: Use relaxed prompt when web results are present (CRAG triggered)
@@ -2029,7 +2079,7 @@ Document context:
 {context}
 
 Provide a concise answer based on the context. If the context doesn't contain relevant information, say so briefly.{date_instruction}{lang_instruction}"""
-    
+
     if citations_enabled:
         prompt += "\nCite sources using [1], [2], etc."
 
@@ -4150,7 +4200,8 @@ from query_enhancement import (
     preprocess_query,  # dedup
     pseudo_relevance_expand,
 )
-from hybrid_search import hybrid_search, get_hybrid_mode
+from hybrid_search import hybrid_search, hybrid_search_all_collections, get_hybrid_mode
+from collection_utils import collection_for_source
 from post_retrieval import rerank_chunks, crag_process, apply_rse, expand_context_window, apply_diversity_filter
 from generation import generate_answer, verify_grounding, is_non_answer
 from quality_ledger import QualityLedger, compute_retrieval_confidence, compute_answer_coverage, compute_entity_coverage
@@ -4226,6 +4277,10 @@ def get_config():
         
         # multipass: Multi-pass parameters
         "multipass_variants": _int_env("MULTIPASS_VARIANTS", 3),
+
+        # collections: explicit --source folder name (query.sh), or blank to
+        # fan out across every per-folder collection and keep the best results.
+        "source": os.environ.get("SOURCE", ""),
     }
 
 def _build_variants(query, config, verbose):
@@ -4270,6 +4325,16 @@ def _build_variants(query, config, verbose):
     return enhanced_queries, hyde_embedding
 
 
+def _search(query, top_k, hyde_embedding, config):
+    """Search a single explicit --source collection, or fan out across every
+    per-folder collection and keep only the best-scoring results when no
+    --source was given."""
+    if config.get("source"):
+        collection = collection_for_source(config["source"], os.environ.get("COLLECTION_NAME", "documents"))
+        return hybrid_search(query, top_k=top_k, hyde_embedding=hyde_embedding, collection=collection)
+    return hybrid_search_all_collections(query, top_k=top_k, hyde_embedding=hyde_embedding)
+
+
 def _retrieve(query, config, verbose):
     """Full retrieval + post-processing for one configuration; returns chunks."""
     enhanced_queries, hyde_embedding = _build_variants(query, config, verbose)
@@ -4278,13 +4343,13 @@ def _retrieve(query, config, verbose):
     if config["multipass_enabled"]:
         max_variants = min(config["multipass_variants"], len(enhanced_queries))
         for i, eq in enumerate(enhanced_queries[:max_variants]):
-            all_chunks.extend(hybrid_search(
-                eq, top_k=3, hyde_embedding=hyde_embedding if i == 0 else None))
+            all_chunks.extend(_search(
+                eq, 3, hyde_embedding if i == 0 else None, config))
     else:
         for eq in enhanced_queries[:3]:
-            all_chunks.extend(hybrid_search(
-                eq, top_k=config["top_k"],
-                hyde_embedding=hyde_embedding if eq == query else None))
+            all_chunks.extend(_search(
+                eq, config["top_k"],
+                hyde_embedding if eq == query else None, config))
 
     # Deduplicate by ID
     seen_ids = set()
@@ -4558,7 +4623,7 @@ def main(query):
             if prf_query != query:
                 if verbose:
                     print(f"[PRF] Expanded query: {prf_query[:100]}...")
-                prf_chunks = hybrid_search(prf_query, top_k=config["top_k"])
+                prf_chunks = _search(prf_query, config["top_k"], None, config)
                 seen_ids = {c.get("id") for c in mp_chunks if isinstance(c, dict)}
                 for c in prf_chunks:
                     if not isinstance(c, dict) or c.get("id") not in seen_ids:
@@ -4650,7 +4715,7 @@ def main(query):
         if prf_query != query:
             if verbose:
                 print(f"[PRF] Expanded query: {prf_query[:100]}...")
-            prf_chunks = hybrid_search(prf_query, top_k=config["top_k"])
+            prf_chunks = _search(prf_query, config["top_k"], None, config)
             seen_ids = {c.get("id") for c in full_chunks if isinstance(c, dict)}
             for c in prf_chunks:
                 if not isinstance(c, dict) or c.get("id") not in seen_ids:
@@ -4762,6 +4827,7 @@ export RERANK_ENABLED RELEVANCE_THRESHOLD
 export SPELLCHECK_ENABLED QUERY_NORMALIZE_ENABLED SPELLCHECK_WHITELIST_FILE
 export DEBUG VERBOSE
 export ADAPTIVE_ENABLED MAX_TIER ESCALATE_CONFIDENCE_MIN
+export SOURCE
 
 # Default settings
 MODE="default"
@@ -4810,6 +4876,14 @@ while [[ $# -gt 0 ]]; do
             fi
             export MAX_TIER="$1"
             shift ;;
+        --source)
+            shift
+            if [ -z "${1:-}" ]; then
+                echo "Error: --source requires a folder name (e.g. --source MAISONS)" >&2
+                exit 2
+            fi
+            export SOURCE="$1"
+            shift ;;
         --no-memory) export MEMORY_ENABLED=false; shift ;;
         --no-cache) export QUERY_CACHE_ENABLED=false; shift ;;
         --clear-cache)
@@ -4852,6 +4926,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --no-memory   Disable conversation memory"
             echo "  --no-cache    Disable query cache"
             echo "  --clear-cache Clear the query cache"
+            echo "  --source NAME Restrict to one top-level documents folder"
+            echo "                (default: fan out across all folders, keep best)"
             echo ""
             echo "Whitelist (cache):"
             echo "  --whitelist-add TERM  Add term to spellcheck whitelist"
