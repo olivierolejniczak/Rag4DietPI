@@ -2957,6 +2957,19 @@ def list_ingest_collections(client, base_collection):
     prefix = f"{base_collection}__"
     matches = [n for n in names if n == base_collection or n.startswith(prefix)]
     return matches or [base_collection]
+
+
+def list_source_names(client, base_collection):
+    """Valid --source values: the slug of each existing per-folder collection,
+    with the shared base-collection prefix stripped. Excludes the base
+    collection itself (files ingested directly at the documents root have no
+    --source name)."""
+    prefix = f"{base_collection}__"
+    return sorted(
+        name[len(prefix):]
+        for name in list_ingest_collections(client, base_collection)
+        if name.startswith(prefix)
+    )
 EOFPY
 log_ok "collection_utils.py"
 

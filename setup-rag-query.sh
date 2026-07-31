@@ -2023,6 +2023,17 @@ def generate_answer(query, chunks, memory_context="", config=None):
     sources = []  # citations: (number, human-readable label) for the footer
     total_chars = 0
 
+    # Multiple top-level document folders can be merged into one answer (the
+    # no-source fan-out path in hybrid_search_all_collections tags each chunk
+    # with its origin "collection"). Only show that folder in the citation
+    # when more than one is actually present, so the common single-source
+    # case stays uncluttered.
+    distinct_collections = {
+        c.get("collection") for c in ordered_chunks
+        if isinstance(c, dict) and c.get("collection")
+    }
+    show_collection = len(distinct_collections) > 1
+
     for i, chunk in enumerate(ordered_chunks):
         text = chunk.get("text", "") if isinstance(chunk, dict) else str(chunk)
         filename = chunk.get("filename", "unknown") if isinstance(chunk, dict) else "unknown"
@@ -2040,6 +2051,10 @@ def generate_answer(query, chunks, memory_context="", config=None):
                 label = src
             else:
                 label = filename or "web"
+            if show_collection:
+                collection = chunk.get("collection") if isinstance(chunk, dict) else None
+                if collection:
+                    label = f"{label} [{collection}]"
             sources.append((i + 1, label))
         else:
             context_parts.append(text)
@@ -4453,7 +4468,9 @@ def _print_rag_only(chunks, config):
         score = chunk.get("rrf_score", 0)
         sparse = chunk.get("sparse_model", "")
         sparse_tag = f" [sparse: {sparse}]" if sparse else ""
-        print(f"[{i}] {filename} (score: {score:.3f}){sparse_tag}")
+        collection = chunk.get("collection", "")
+        collection_tag = f" [{collection}]" if collection else ""
+        print(f"[{i}] {filename} (score: {score:.3f}){sparse_tag}{collection_tag}")
         print(f"    {text}...")
         print()
 
@@ -4530,6 +4547,29 @@ def main(query):
         print(f"[ERROR] {coll_status['detail']}")
         print("Ingest documents first with: ./ingest.sh")
         return
+
+    # Fail fast on an unknown --source too, instead of silently falling through
+    # to "No relevant documents found." -- list the valid folder names so a
+    # typo is obvious.
+    if config.get("source"):
+        base_collection = os.environ.get("COLLECTION_NAME", "documents")
+        source_collection = collection_for_source(config["source"], base_collection)
+        source_status = check_collection_status(collection_name=source_collection)
+        if source_status["status"] == "missing":
+            from collection_utils import list_source_names
+            from qdrant_client_helper import get_client
+            client, _mode = get_client()
+            available = list_source_names(client, base_collection) if client else []
+            print(f"[ERROR] Unknown --source '{config['source']}' (no collection '{source_collection}').")
+            if available:
+                print(f"Available sources: {', '.join(available)}")
+            else:
+                print("No per-folder collections found yet. Ingest documents first with: ./ingest.sh")
+            return
+        if source_status["status"] == "unreachable":
+            print(f"[ERROR] Qdrant is unreachable: {source_status['detail']}")
+            print("Check services with: ./status.sh")
+            return
 
     # Get memory context (only if relevant to current query)
     memory = ConversationMemory() if config["memory_enabled"] else None
@@ -4884,6 +4924,23 @@ while [[ $# -gt 0 ]]; do
             fi
             export SOURCE="$1"
             shift ;;
+        --list-sources)
+            python3 -c "
+import sys; sys.path.insert(0, './lib')
+from collection_utils import list_source_names
+from qdrant_client_helper import get_client
+import os
+client, _mode = get_client()
+base = os.environ.get('COLLECTION_NAME', 'documents')
+sources = list_source_names(client, base) if client else []
+if sources:
+    print('Available --source values:')
+    for s in sources:
+        print(f'  {s}')
+else:
+    print('No per-folder collections found yet. Ingest documents first with: ./ingest.sh')
+"
+            exit 0 ;;
         --no-memory) export MEMORY_ENABLED=false; shift ;;
         --no-cache) export QUERY_CACHE_ENABLED=false; shift ;;
         --clear-cache)
@@ -4928,6 +4985,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --clear-cache Clear the query cache"
             echo "  --source NAME Restrict to one top-level documents folder"
             echo "                (default: fan out across all folders, keep best)"
+            echo "  --list-sources List available --source folder names and exit"
             echo ""
             echo "Whitelist (cache):"
             echo "  --whitelist-add TERM  Add term to spellcheck whitelist"
