@@ -3262,23 +3262,31 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
     }
 
 def ingest_directory(docs_dir, qdrant_host, collection_name, chunk_size=500,
-                     chunk_overlap=80, debug=False, force=False):
+                     chunk_overlap=80, debug=False, force=False, collection_root=None):
     """Ingest all documents in directory
 
     Args:
-        docs_dir: Documents directory
+        docs_dir: Directory to walk for files to ingest (may be the
+            documents root itself or one specific subfolder within it)
         qdrant_host: Qdrant host URL
         collection_name: Base collection name (per-file collection is derived
-            from the file's top-level folder under docs_dir; see
+            from the file's top-level folder under collection_root; see
             collection_utils.collection_for_path)
         chunk_size: Target chunk size
         chunk_overlap: Chunk overlap
         debug: Enable debug output
         force: Force re-ingestion
+        collection_root: Documents root used to derive each file's top-level
+            folder for collection naming. Must stay the true documents root
+            even when docs_dir points at one specific subfolder, or nested
+            folders within that subfolder would be mistaken for top-level
+            folders and each get split into their own collection. Defaults
+            to docs_dir when not given (docs_dir already is the root).
 
     Returns:
         dict: Summary of ingestion
     """
+    collection_root = collection_root or docs_dir
     supported = get_supported_extensions()
     results = {"success": 0, "skipped": 0, "errors": 0, "files": []}
 
@@ -3300,7 +3308,7 @@ def ingest_directory(docs_dir, qdrant_host, collection_name, chunk_size=500,
 
     for i, file_path in enumerate(files, 1):
         filename = os.path.basename(file_path)
-        file_collection = collection_for_path(file_path, docs_dir, collection_name)
+        file_collection = collection_for_path(file_path, collection_root, collection_name)
 
         # Always show progress line with flush
         collection_tag = f" [{file_collection}]" if file_collection != collection_name else ""
@@ -3411,6 +3419,7 @@ def main():
             path, qdrant_host, collection_name,
             chunk_size=chunk_size, chunk_overlap=chunk_overlap,
             debug=debug, force=args.force,
+            collection_root=docs_dir,
         )
         print(f"\nIngestion complete:")
         print(f"  Success: {results['success']}")
