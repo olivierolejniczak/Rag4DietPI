@@ -52,7 +52,7 @@ LLM_STATE_DIR="/var/lib/rag-llm"
 MODELS_DIR="$LLM_STATE_DIR/models"
 YAML_PATH="$LLM_STATE_DIR/llama-swap.yaml"
 SERVICE_NAME="rag-llm.service"
-LISTEN_ADDR="127.0.0.1:11434"   # on reutilise le port d'Ollama pour minimiser les changements
+LISTEN_ADDR="0.0.0.0:11434"     # expose sur le LAN (UI + API) ; reutilise le port d'Ollama
 SVC_USER="ragsvc"
 NPROC="$(nproc)"
 
@@ -323,6 +323,24 @@ models:
   "rag-embed":
     cmd: /usr/local/bin/llama-server -m ${MODELS_DIR}/${FILE_EMB} --embeddings --pooling cls -c 512 --host 127.0.0.1 --port \${PORT} -t ${NPROC}
     ttl: 600
+
+# rag-embed est un repli dormant (FastEmbed tourne en local et reste primaire ;
+# rag-embed n'est sollicite que si FastEmbed devient indisponible). L'isoler
+# dans son propre groupe evite que ce repli rare n'evince un modele de chat
+# actif, et inversement.
+groups:
+  chat:
+    swap: true
+    exclusive: true
+    members:
+      - "rag-quick"
+      - "rag-default"
+      - "rag-deep"
+  embed:
+    swap: false
+    exclusive: false
+    members:
+      - "rag-embed"
 YAML
 log_ok "llama-swap.yaml genere (tiers : quick=${M_QUICK}, default=${M_DEFAULT}, deep=${M_DEEP})."
 
@@ -426,10 +444,10 @@ log_ok "Ollama arrete et desinstalle."
 systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 # Le port 11434 doit etre libre avant de demarrer llama-swap.
 for _ in $(seq 1 10); do
-    ss -ltn 2>/dev/null | grep -q '127.0.0.1:11434' || break
+    ss -ltn 2>/dev/null | grep -q ':11434 ' || break
     sleep 1
 done
-if ss -ltn 2>/dev/null | grep -q '127.0.0.1:11434'; then
+if ss -ltn 2>/dev/null | grep -q ':11434 '; then
     warn "Le port 11434 est encore occupe — llama-swap risque de ne pas demarrer (ss -ltnp | grep 11434)."
 fi
 

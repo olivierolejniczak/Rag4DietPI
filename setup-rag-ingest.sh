@@ -2905,6 +2905,74 @@ if __name__ == '__main__':
 EOFPY
 log_ok "extended_formats.py"
 
+log_info "Creating collection_utils.py..."
+cat > "$PROJECT_DIR/lib/collection_utils.py" << 'EOFPY'
+"""Derive Qdrant collection names from folder structure.
+
+One collection per top-level folder under the documents root: keeps
+unrelated document sets isolated so a query against one set never
+surfaces chunks from another. Files placed directly in the documents
+root (no subfolder) use the base collection unchanged.
+"""
+import os
+import re
+
+
+def slugify(name):
+    """Lowercase, replace runs of non-alphanumeric chars with a single underscore."""
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
+def collection_for_path(file_path, docs_root, base_collection):
+    """Collection name for a file being ingested, derived from its top-level
+    folder under docs_root."""
+    try:
+        rel = os.path.relpath(os.path.abspath(file_path), os.path.abspath(docs_root))
+    except ValueError:
+        return base_collection
+    if rel.startswith(".."):
+        return base_collection
+    parts = rel.split(os.sep)
+    if len(parts) <= 1:
+        return base_collection
+    return f"{base_collection}__{slugify(parts[0])}"
+
+
+def collection_for_source(source_name, base_collection):
+    """Collection name for an explicit query-side --source folder name."""
+    if not source_name:
+        return base_collection
+    name = os.path.basename(os.path.normpath(source_name))
+    return f"{base_collection}__{slugify(name)}"
+
+
+def list_ingest_collections(client, base_collection):
+    """All existing collections for this dataset: the base collection plus
+    any per-folder collections derived from it. Falls back to just the base
+    name if Qdrant can't be reached or has no collections yet."""
+    try:
+        names = [c.name for c in client.get_collections().collections]
+    except Exception:
+        return [base_collection]
+    prefix = f"{base_collection}__"
+    matches = [n for n in names if n == base_collection or n.startswith(prefix)]
+    return matches or [base_collection]
+
+
+def list_source_names(client, base_collection):
+    """Valid --source values: the slug of each existing per-folder collection,
+    with the shared base-collection prefix stripped. Excludes the base
+    collection itself (files ingested directly at the documents root have no
+    --source name)."""
+    prefix = f"{base_collection}__"
+    return sorted(
+        name[len(prefix):]
+        for name in list_ingest_collections(client, base_collection)
+        if name.startswith(prefix)
+    )
+EOFPY
+log_ok "collection_utils.py"
+
 log_info "Creating ingest_main.py..."
 cat > "$PROJECT_DIR/lib/ingest_main.py" << 'EOFPY'
 """Main document ingestion pipeline
@@ -2940,6 +3008,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from unstructured_parser import parse_document, get_supported_extensions
 from smart_chunker import smart_chunk
 from embedding_helper import get_embedding, get_embeddings_batch, get_embedding_dimension
+
+# collections: one Qdrant collection per top-level folder under the
+# documents root, so unrelated document sets never leak into each other's
+# search results.
+from collection_utils import collection_for_path
 
 # Import sparse embedding helper (hybrid)
 from sparse_embedding_helper import (
@@ -3201,25 +3274,35 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
         "sparse": sparse_embeddings is not None,
     }
 
-def ingest_directory(docs_dir, qdrant_host, collection_name, chunk_size=500, 
-                     chunk_overlap=80, debug=False, force=False):
+def ingest_directory(docs_dir, qdrant_host, collection_name, chunk_size=500,
+                     chunk_overlap=80, debug=False, force=False, collection_root=None):
     """Ingest all documents in directory
-    
+
     Args:
-        docs_dir: Documents directory
+        docs_dir: Directory to walk for files to ingest (may be the
+            documents root itself or one specific subfolder within it)
         qdrant_host: Qdrant host URL
-        collection_name: Collection name
+        collection_name: Base collection name (per-file collection is derived
+            from the file's top-level folder under collection_root; see
+            collection_utils.collection_for_path)
         chunk_size: Target chunk size
         chunk_overlap: Chunk overlap
         debug: Enable debug output
         force: Force re-ingestion
-    
+        collection_root: Documents root used to derive each file's top-level
+            folder for collection naming. Must stay the true documents root
+            even when docs_dir points at one specific subfolder, or nested
+            folders within that subfolder would be mistaken for top-level
+            folders and each get split into their own collection. Defaults
+            to docs_dir when not given (docs_dir already is the root).
+
     Returns:
         dict: Summary of ingestion
     """
+    collection_root = collection_root or docs_dir
     supported = get_supported_extensions()
     results = {"success": 0, "skipped": 0, "errors": 0, "files": []}
-    
+
     # Find all files
     files = []
     for root, _, filenames in os.walk(docs_dir):
@@ -3227,21 +3310,23 @@ def ingest_directory(docs_dir, qdrant_host, collection_name, chunk_size=500,
             ext = os.path.splitext(filename)[1].lower()
             if ext in supported:
                 files.append(os.path.join(root, filename))
-    
+
     if not files:
         print(f"No supported files found in {docs_dir}")
         return results
-    
+
     total = len(files)
     print(f"Found {total} documents to process")
     print("")
-    
+
     for i, file_path in enumerate(files, 1):
         filename = os.path.basename(file_path)
-        
+        file_collection = collection_for_path(file_path, collection_root, collection_name)
+
         # Always show progress line with flush
-        print(f"  [{i}/{total}] {filename}", end="", flush=True)
-        
+        collection_tag = f" [{file_collection}]" if file_collection != collection_name else ""
+        print(f"  [{i}/{total}] {filename}{collection_tag}", end="", flush=True)
+
         # Show file size for large files
         try:
             file_size = os.path.getsize(file_path)
@@ -3249,13 +3334,13 @@ def ingest_directory(docs_dir, qdrant_host, collection_name, chunk_size=500,
                 print(f" ({file_size // (1024*1024)}MB)", end="", flush=True)
         except Exception:
             pass
-        
+
         result = ingest_file(
-            file_path, qdrant_host, collection_name,
+            file_path, qdrant_host, file_collection,
             chunk_size=chunk_size, chunk_overlap=chunk_overlap,
             debug=debug, force=force,
         )
-        
+
         results["files"].append(result)
         
         # Show result on same line
@@ -3306,10 +3391,18 @@ def main():
     print(f"Sparse model: {sparse_info['model']} (available: {sparse_info['available']})")
     print("")
     
-    # Recreate collection if requested
+    # Recreate collection(s) if requested. Since documents are split across
+    # one collection per top-level folder, this must clear all of them, not
+    # just the base collection, or stale per-folder collections would survive
+    # a "start fresh" re-ingestion.
     if args.recreate:
-        print(f"Recreating collection: {collection_name}")
-        delete_collection(collection_name)
+        from collection_utils import list_ingest_collections
+        from qdrant_client_helper import get_client
+        client, _ = get_client()
+        targets = list_ingest_collections(client, collection_name) if client else [collection_name]
+        print(f"Recreating collection(s): {', '.join(targets)}")
+        for name in targets:
+            delete_collection(name)
         # Clear tracking files
         import shutil
         if os.path.exists(".ingest_tracking"):
@@ -3327,8 +3420,9 @@ def main():
     path = args.path or docs_dir
     
     if os.path.isfile(path):
+        file_collection = collection_for_path(path, docs_dir, collection_name)
         result = ingest_file(
-            path, qdrant_host, collection_name,
+            path, qdrant_host, file_collection,
             chunk_size=chunk_size, chunk_overlap=chunk_overlap,
             debug=debug, force=args.force,
         )
@@ -3338,6 +3432,7 @@ def main():
             path, qdrant_host, collection_name,
             chunk_size=chunk_size, chunk_overlap=chunk_overlap,
             debug=debug, force=args.force,
+            collection_root=docs_dir,
         )
         print(f"\nIngestion complete:")
         print(f"  Success: {results['success']}")
