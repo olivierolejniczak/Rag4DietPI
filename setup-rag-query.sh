@@ -4230,6 +4230,19 @@ def _int_env(key, default):
     except (TypeError, ValueError):
         return int(default)
 
+# reflection: LLM-tier ladder for escalation, cheapest first. Mirrors the
+# mode names llm_helper._resolve_model() understands (quick/default/deep).
+_TIER_LADDER = ["quick", "default", "deep"]
+
+def _current_llm_tier():
+    """Which rung of _TIER_LADDER QUERY_MODE_ACTIVE currently resolves to."""
+    mode = os.environ.get("QUERY_MODE_ACTIVE", os.environ.get("QUERY_MODE_DEFAULT", "default"))
+    if mode in ("quick", "ultrafast", "fast"):
+        return "quick"
+    if mode in ("deep", "research", "comprehensive"):
+        return "deep"
+    return "default"
+
 def _float_env(key, default):
     """float() an env var, tolerating a missing/blank/invalid value."""
     try:
@@ -4283,7 +4296,17 @@ def get_config():
         "escalate_threshold": _float_env("ESCALATE_CONFIDENCE_MIN", 0.35),
         "abstention_floor": _float_env("ABSTENTION_MIN", 0.05),
         "max_tier": _int_env("MAX_TIER", 3),
-        "abstention_message": os.environ.get("ABSTENTION_MESSAGE", 
+
+        # reflection: separate axis from the retrieval cascade above - escalates
+        # the LLM tier itself (quick -> default -> deep) when a groundedness
+        # check on the generated answer is uncertain, instead of retrying the
+        # same (possibly under-powered) model. Gated by should_verify() so the
+        # extra verification call only fires for high-stakes queries (or when
+        # REFLECTION_ALWAYS=true), keeping the cost near zero for normal queries.
+        "tier_escalation_enabled": os.environ.get("REFLECTION_ENABLED", "false").lower() == "true",
+        "tier_escalation_confidence_threshold": _float_env("REFLECTION_CONFIDENCE_THRESHOLD", 0.7),
+        "tier_escalation_max_retries": _int_env("REFLECTION_MAX_RETRIES", 1),
+        "abstention_message": os.environ.get("ABSTENTION_MESSAGE",
             "Je n'ai pas assez d'informations fiables pour repondre avec confiance."),
         
         # Hybrid search (hybrid)
@@ -4770,7 +4793,42 @@ def main(query):
                 print(f"[ADAPTIVE] Forced full retrieval recovered an answer (score {full_conf:.2f})")
             elif verbose:
                 print("[ADAPTIVE] Forced full retrieval did not recover an answer")
-    
+
+    # reflection: LLM-tier escalation. Separate axis from the retrieval
+    # cascade above - if the answer's groundedness is uncertain, regenerate
+    # with the next LLM tier up (quick -> default -> deep) rather than
+    # retrying the same model, which is how the multipass/full escalation
+    # above already handles retrieval quality. Only runs for high-stakes
+    # queries (or REFLECTION_ALWAYS=true) to keep the extra verification
+    # call's cost near zero for everyday queries.
+    if config["tier_escalation_enabled"]:
+        from reflection import verify_answer, should_verify
+        if should_verify(query):
+            context_text = "\n\n".join(
+                c.get("text", "") for c in chunks if isinstance(c, dict)
+            )
+            retries = 0
+            max_retries = config["tier_escalation_max_retries"]
+            conf_threshold = config["tier_escalation_confidence_threshold"]
+            tier_idx = _TIER_LADDER.index(_current_llm_tier())
+            while tier_idx < len(_TIER_LADDER) - 1 and retries < max_retries:
+                verdict = verify_answer(query, answer, context_text)
+                if verbose:
+                    print(f"[REFLECTION] grounded={verdict['grounded']} "
+                          f"confidence={verdict['confidence']:.2f}")
+                if verdict["grounded"] and verdict["confidence"] >= conf_threshold:
+                    break
+                tier_idx += 1
+                next_tier = _TIER_LADDER[tier_idx]
+                if verbose:
+                    print(f"[REFLECTION] Escalating LLM tier to '{next_tier}' "
+                          f"and regenerating")
+                os.environ["QUERY_MODE_ACTIVE"] = next_tier
+                new_answer = generate_answer(query, chunks, memory_context, gen_cfg)
+                if new_answer:
+                    answer = new_answer
+                retries += 1
+
     # Grounding check
     grounding_score = 1.0
     if config["grounding_check_enabled"]:
