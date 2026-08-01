@@ -677,7 +677,9 @@ EXTRACTION_DEDUP_THRESHOLD=0.85
 # SELF-REFLECTION / VERIFICATION (System)
 # ============================================================================
 
-# Enable answer verification
+# Enable answer verification. Gates the LLM-tier escalation in query_main.py
+# (quick -> default -> deep): if verify_answer() says the answer isn't
+# grounded, regenerate with the next tier up instead of retrying same model.
 REFLECTION_ENABLED=true
 
 # Minimum confidence threshold (0.0-1.0)
