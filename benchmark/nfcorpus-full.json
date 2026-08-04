@@ -1,0 +1,31 @@
+{
+  "dataset": "nfcorpus",
+  "split": "test",
+  "corpus_size": 3633,
+  "num_queries": 323,
+  "index_seconds": 1936.3567502498627,
+  "qdrant_mode": "grpc",
+  "embedding_model": "BAAI/bge-base-en-v1.5",
+  "sparse_model": "prithivida/Splade_PP_en_v1",
+  "rerank_model": "ms-marco-MiniLM-L-12-v2",
+  "results": {
+    "dense": {
+      "nDCG@10": 0.3700154052240883,
+      "Recall@100": 0.32901421634270933,
+      "MAP": 0.17954936032790453,
+      "ms_per_query": 4.730987844083332
+    },
+    "hybrid": {
+      "nDCG@10": 0.3683437781172677,
+      "Recall@100": 0.3330620655554117,
+      "MAP": 0.17797442306311467,
+      "ms_per_query": 5.790941486417694
+    },
+    "hybrid_rerank": {
+      "nDCG@10": 0.3459004254832854,
+      "Recall@100": 0.33321012309042125,
+      "MAP": 0.16337509471319459,
+      "ms_per_query": 5968.372599628319
+    }
+  }
+}
