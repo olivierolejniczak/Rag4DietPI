@@ -59,11 +59,19 @@ NPROC="$(nproc)"
 # Depots HuggingFace des GGUF (variante Q4_K_M pour les LLM, f16 pour l'embed)
 REPO_Q15="Qwen/Qwen2.5-1.5B-Instruct-GGUF"
 REPO_Q3="Qwen/Qwen2.5-3B-Instruct-GGUF"
-REPO_Q7="Qwen/Qwen2.5-7B-Instruct-GGUF"
+# deep : Qwen3-4B-Instruct-2507, pas Qwen2.5-7B - benchmarke sur le workload reel
+# (extraction structuree folder_decomposition) le 2026-08-03 : qualite egale ou
+# superieure au 7B tout en etant ~60% plus rapide sur ce CPU (8,5 vs 5,4 tok/s) et
+# non-sharde (1 seul fichier, pas de shards -00001-of-00002). Le -Instruct-2507 ne
+# fait PAS de "thinking" par defaut (contrairement au Qwen3 dense de base, qui
+# consomme son budget de tokens en raisonnement cache et ne repond jamais dans les
+# contraintes JSON schema de folder_decomposition.py - verifie directement).
+REPO_DEEP="MaziyarPanahi/Qwen3-4B-Instruct-2507-GGUF"
 REPO_EMB="CompendiumLabs/bge-base-en-v1.5-gguf"
 
 FILE_Q15="qwen2.5-1.5b-instruct-q4_k_m.gguf"
 FILE_Q3="qwen2.5-3b-instruct-q4_k_m.gguf"
+FILE_DEEP="Qwen3-4B-Instruct-2507.Q4_K_M.gguf"
 # bge-base-en-v1.5 en f16 : meme famille/dimension (768) que FastEmbed -> pas de
 # reindexation. FastEmbed reste la source primaire ; llama-swap ne sert les
 # embeddings qu'en repli (voir lib/llm_helper.py).
@@ -135,29 +143,6 @@ hf_download() {
     fi
     download_verified "https://huggingface.co/${repo}/resolve/main/${file}?download=true" "$dest" "$expected"
     log_ok "$file"
-}
-
-# hf_download_q4km <repo> <dest_dir>
-# Telecharge TOUS les fichiers Q4_K_M .gguf d'un depot (gere le cas des modeles
-# scindes en shards, ex. 7B = *-00001-of-00002.gguf) et renvoie le 1er shard,
-# celui a passer a llama-server (-m) qui charge automatiquement les suivants.
-hf_download_q4km() {
-    local repo="$1" dir="$2" files f first
-    files="$(curl -fsSL "https://huggingface.co/api/models/${repo}" 2>/dev/null \
-        | python3 -c 'import sys,json; d=json.load(sys.stdin); [print(s["rfilename"]) for s in d.get("siblings",[]) if s["rfilename"].lower().endswith(".gguf") and "q4_k_m" in s["rfilename"].lower()]' \
-        | sort)"
-    if [ -z "$files" ]; then
-        log_err "Aucun fichier Q4_K_M trouve dans $repo"
-        return 1
-    fi
-    while IFS= read -r f; do
-        [ -n "$f" ] || continue
-        hf_download "$repo" "$f" "$dir/$f" >&2
-    done <<EOF
-$files
-EOF
-    first="$(printf '%s\n' "$files" | head -1)"
-    printf '%s' "$first"
 }
 
 # ============================================================================
@@ -249,7 +234,7 @@ mkdir -p "$MODELS_DIR"
 #   empreinte(modele) ~= poids Q4_K_M resident + buffers calcul (~600 Mo)
 #                        + cache KV(ctx)
 # Le cache KV fp16 = 2(K+V) * n_layers * n_kv_heads * head_dim * ctx * 2 octets
-# est faible ici (GQA) : ~0,45 Go pour le 7B @8k, negligeable devant les poids.
+# est faible ici (GQA) : ~0,3 Go pour le 4B @8k, negligeable devant les poids.
 # On pre-calcule donc une empreinte crete par modele@ctx (en Mo).
 # RESERVED couvre Docker+Qdrant+SearXNG (~0,5 Go), FastEmbed+Splade+process de
 # requete (~1,3 Go), OS + marge (~1,7 Go).
@@ -261,7 +246,7 @@ BUDGET_MB=$(( RAM_MB - RESERVED_MB ))
 
 NEED_Q15=1800   # 1.5b Q4_K_M @ 4k  (~1,1 Go poids + 0,6 buffers + ~0,1 KV)
 NEED_Q3=2900    # 3b   Q4_K_M @ 8k  (~2,0 Go poids + 0,6 buffers + ~0,3 KV)
-NEED_Q7=5850    # 7b   Q4_K_M @ 8k  (~4,8 Go poids + 0,6 buffers + ~0,45 KV)
+NEED_DEEP=3400  # 4b   Q4_K_M @ 8k  (~2,5 Go poids + 0,6 buffers + ~0,3 KV)
 
 log_info "RAM ${RAM_GB} Go — budget LLM estime : ${BUDGET_MB} Mo (reserve ${RESERVED_MB} Mo)."
 
@@ -278,11 +263,10 @@ else
     M_DEFAULT="$FILE_Q15"; CTX_DEFAULT="$CTX_QUICK"
 fi
 
-# deep : le plus gros modele dont l'empreinte tient (7b > 3b > 1.5b).
-if [ "$BUDGET_MB" -ge "$NEED_Q7" ]; then
-    # Le 7B est scinde en shards : on telecharge tout et on pointe sur le 1er.
-    Q7_MAIN="$(hf_download_q4km "$REPO_Q7" "$MODELS_DIR")"
-    M_DEEP="$Q7_MAIN"; CTX_DEEP=8192
+# deep : le plus gros modele dont l'empreinte tient (4b > 3b > 1.5b).
+if [ "$BUDGET_MB" -ge "$NEED_DEEP" ]; then
+    hf_download "$REPO_DEEP" "$FILE_DEEP" "$MODELS_DIR/$FILE_DEEP"
+    M_DEEP="$FILE_DEEP"; CTX_DEEP=8192
 elif [ "$BUDGET_MB" -ge "$NEED_Q3" ]; then
     hf_download "$REPO_Q3" "$FILE_Q3" "$MODELS_DIR/$FILE_Q3"  # no-op si deja present
     M_DEEP="$FILE_Q3"; CTX_DEEP=8192
@@ -290,8 +274,8 @@ else
     M_DEEP="$FILE_Q15"; CTX_DEEP="$CTX_QUICK"
 fi
 
-# Etiquette lisible (taille) pour le journal, ex. "3b" / "7b".
-_sz() { echo "$1" | grep -oE '[0-9.]+b' | head -1; }
+# Etiquette lisible (taille) pour le journal, ex. "3b" / "4B".
+_sz() { echo "$1" | grep -ioE '[0-9.]+b' | head -1; }
 log_info "Tiers retenus : quick=$(_sz "$M_QUICK")(@${CTX_QUICK}) default=$(_sz "$M_DEFAULT")(@${CTX_DEFAULT}) deep=$(_sz "$M_DEEP")(@${CTX_DEEP})."
 
 # Modele d'embedding (repli ; FastEmbed reste primaire).
