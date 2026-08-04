@@ -216,6 +216,44 @@ Embeddings use FastEmbed (`bge-base-en-v1.5`, 768-d) as the primary
 source; llama-swap serves a matching `bge-base` GGUF (`rag-embed`) only as a
 fallback, so the vector space stays consistent and no re-ingest is needed.
 
+**Low memory footprint by design.** Because llama-swap loads a model only on the
+first request that needs it and unloads it after an idle TTL, at most one LLM is
+resident at a time — so the three tiers cost the RAM of the *largest one in use*,
+not the sum. On a constrained box this is what makes multiple model tiers
+affordable at all.
+
+### llama-swap web console
+
+llama-swap ships a built-in web UI at **`http://<host>:11434/ui/`** — a zero-cost
+way to operate and test the backend without touching the CLI:
+
+- **Models** — see which tier is currently loaded/unloaded, load or evict a model
+  on demand.
+- **Playground** — a chat panel to try each model (`rag-quick` / `rag-default` /
+  `rag-deep`) directly and eyeball quality/speed before wiring it into a query.
+- **Activity** — per-request logging: prompt/generation token counts and timing
+  for every call the pipeline makes.
+- **Performance metrics** — graphical throughput (tokens/sec) and latency per
+  request, handy for comparing tiers on your hardware.
+- **Logs** — live upstream `llama-server` + proxy logs, so a slow or failed
+  generation is diagnosable in the browser.
+
+### Services & endpoints
+
+Once the stack is up (`./status.sh`), these local endpoints are available:
+
+| Service | URL | Purpose |
+|---------|-----|---------|
+| **llama-swap** — UI | `http://localhost:11434/ui/` | Models, playground, activity, metrics, logs |
+| **llama-swap** — API | `http://localhost:11434/v1` | OpenAI-compatible API the pipeline calls |
+| **Qdrant** — dashboard | `http://localhost:6333/dashboard` | Browse collections/points, run queries |
+| **Qdrant** — REST / gRPC | `http://localhost:6333` / `:6334` | Vector DB API (gRPC is the fast path) |
+| **SearXNG** | `http://localhost:8085` | Private metasearch for web-fallback (CRAG) |
+| **llama-server** | *internal, dynamic port* | llama.cpp workers — spawned/torn down by llama-swap on `127.0.0.1`, not exposed directly |
+
+Ports come from `config.env` (`QDRANT_HOST`, `SEARXNG_URL`, `LLM_API_BASE`); the
+table shows the defaults.
+
 ## Configuration
 
 All settings are in `config.env`. Key options:
