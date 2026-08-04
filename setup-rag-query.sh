@@ -36,6 +36,7 @@ Les embeddings passent en priorite par FastEmbed ; llama-swap (/v1/embeddings)
 n'est qu'un repli et doit rester dans le meme espace vectoriel (bge-base, 768-d).
 """
 import os
+import sys
 import requests
 import time
 from typing import Any, Dict, Optional
@@ -161,6 +162,7 @@ def llm_generate(prompt, max_tokens=500, timeout=None, temperature=None,
         payload["response_format"] = response_format
 
     start = time.time()
+    reason = "unknown error"
     for attempt in range(config["retries"] + 1):
         try:
             resp = requests.post(url, json=payload, timeout=req_timeout)
@@ -169,20 +171,27 @@ def llm_generate(prompt, max_tokens=500, timeout=None, temperature=None,
                 choices = resp.json().get("choices", [])
                 if choices:
                     return (choices[0].get("message", {}).get("content") or "").strip()
-                return None
+                reason = "backend returned no choices"
+                break
             # 502/503 : modele en cours de chargement -> on retente avec backoff.
             if resp.status_code in (502, 503) and attempt < config["retries"]:
                 time.sleep(2 * (attempt + 1))
                 continue
+            reason = f"HTTP {resp.status_code}: {resp.text[:200]}"
             break
         except requests.exceptions.Timeout:
+            reason = (f"timed out after {req_timeout}s "
+                      "(raise LLM_TIMEOUT_* or use a lighter --mode)")
             break
-        except requests.exceptions.RequestException:
+        except requests.exceptions.RequestException as e:
+            reason = f"request failed: {e}"
             if attempt < config["retries"]:
                 time.sleep(2 * (attempt + 1))
                 continue
             break
     _debug_info["llm_total_time"] += time.time() - start
+    print(f"[LLM] generation failed ({config['llm_model']}): {reason}",
+          file=sys.stderr)
     return None
 
 def llm_generate_fast(prompt, max_tokens=100):
@@ -4568,29 +4577,24 @@ def main(query):
             print(cached)
             return
 
-    # Fail fast with a clear message if the collection is not queryable, rather
-    # than returning a bare "No relevant documents found." for every failure.
-    from qdrant_client_helper import check_collection_status
-    coll_status = check_collection_status()
-    if coll_status["status"] == "unreachable":
-        print(f"[ERROR] Qdrant is unreachable: {coll_status['detail']}")
-        print("Check services with: ./status.sh")
-        return
-    if coll_status["status"] == "missing":
-        print(f"[ERROR] {coll_status['detail']}")
-        print("Ingest documents first with: ./ingest.sh")
-        return
+    # Fail fast with a clear message if nothing is queryable, rather than
+    # returning a bare "No relevant documents found." for every failure.
+    # Ingestion writes one collection per source folder ("<base>__<slug>"), so
+    # there is normally no bare base collection: validate the per-source
+    # collection when --source is given, otherwise require at least one
+    # per-folder collection to exist.
+    from qdrant_client_helper import check_collection_status, get_client
+    from collection_utils import list_ingest_collections, list_source_names
+    base_collection = os.environ.get("COLLECTION_NAME", "documents")
 
-    # Fail fast on an unknown --source too, instead of silently falling through
-    # to "No relevant documents found." -- list the valid folder names so a
-    # typo is obvious.
     if config.get("source"):
-        base_collection = os.environ.get("COLLECTION_NAME", "documents")
         source_collection = collection_for_source(config["source"], base_collection)
         source_status = check_collection_status(collection_name=source_collection)
+        if source_status["status"] == "unreachable":
+            print(f"[ERROR] Qdrant is unreachable: {source_status['detail']}")
+            print("Check services with: ./status.sh")
+            return
         if source_status["status"] == "missing":
-            from collection_utils import list_source_names
-            from qdrant_client_helper import get_client
             client, _mode = get_client()
             available = list_source_names(client, base_collection) if client else []
             print(f"[ERROR] Unknown --source '{config['source']}' (no collection '{source_collection}').")
@@ -4599,9 +4603,14 @@ def main(query):
             else:
                 print("No per-folder collections found yet. Ingest documents first with: ./ingest.sh")
             return
-        if source_status["status"] == "unreachable":
-            print(f"[ERROR] Qdrant is unreachable: {source_status['detail']}")
-            print("Check services with: ./status.sh")
+    else:
+        client, _mode = get_client()
+        if not client:
+            print("[ERROR] Qdrant is unreachable. Check services with: ./status.sh")
+            return
+        if not list_ingest_collections(client, base_collection):
+            print(f"[ERROR] No ingested collections found for '{base_collection}'.")
+            print("Ingest documents first with: ./ingest.sh")
             return
 
     # Get memory context (only if relevant to current query)
