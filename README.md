@@ -252,7 +252,11 @@ Once the stack is up (`./status.sh`), these local endpoints are available:
 | **llama-server** | *internal, dynamic port* | llama.cpp workers — spawned/torn down by llama-swap on `127.0.0.1`, not exposed directly |
 
 Ports come from `config.env` (`QDRANT_HOST`, `SEARXNG_URL`, `LLM_API_BASE`); the
-table shows the defaults.
+table shows the defaults. The `llama-server` worker port is assigned dynamically
+by llama-swap per model — to find the one in use, open the console **Logs** tab
+(`:11434/ui/`, the upstream line shows `--port <N>`) or run
+`journalctl -u rag-llm.service -f`. You normally never call it directly; go
+through the llama-swap API on `:11434`.
 
 ## Configuration
 
