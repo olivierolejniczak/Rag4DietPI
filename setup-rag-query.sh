@@ -5019,6 +5019,9 @@ else:
     print('No per-folder collections found yet. Ingest documents first with: ./ingest.sh')
 "
             exit 0 ;;
+        --list-folders)
+            LIST_FOLDERS=1; shift
+            if [[ "${1:-}" =~ ^[0-9]+$ ]]; then FOLDERS_DEPTH="$1"; shift; fi ;;
         --no-memory) export MEMORY_ENABLED=false; shift ;;
         --no-cache) export QUERY_CACHE_ENABLED=false; shift ;;
         --clear-cache)
@@ -5064,6 +5067,9 @@ else:
             echo "  --source NAME Restrict to one top-level documents folder"
             echo "                (default: fan out across all folders, keep best)"
             echo "  --list-sources List available --source folder names and exit"
+            echo "  --list-folders [DEPTH]  List sub-folders in a source (with file"
+            echo "                counts) and exit; pair with --source. DEPTH limits"
+            echo "                path segments (e.g. 3 -> .../property/contrat)."
             echo ""
             echo "Whitelist (cache):"
             echo "  --whitelist-add TERM  Add term to spellcheck whitelist"
@@ -5081,6 +5087,38 @@ else:
 done
 
 QUERY=$(echo "$EXTRA_ARGS" | sed 's/^ *//')
+
+# --list-folders: deferred so --source is captured wherever it appears. Scrolls
+# the source collection's payloads and prints its folder tree (one "Contrat
+# <Name>" folder per tenant, etc.) -- deterministic, no LLM/vector search.
+if [ -n "${LIST_FOLDERS:-}" ]; then
+    python3 -c "
+import sys, os; sys.path.insert(0, './lib')
+from collection_utils import collection_for_source, list_ingest_collections, list_folders
+from qdrant_client_helper import get_client
+base = os.environ.get('COLLECTION_NAME', 'documents')
+docs = os.environ.get('DOCUMENTS_DIR', '/root/documents')
+depth = ${FOLDERS_DEPTH:-0} or None
+src = os.environ.get('SOURCE', '')
+if src:
+    cols = [collection_for_source(src, base)]
+else:
+    client, _m = get_client()
+    cols = list_ingest_collections(client, base) if client else [base]
+found = False
+for col in cols:
+    rows = [(d, n) for d, n in list_folders(col, docs, depth=depth) if d]
+    if not rows:
+        continue
+    found = True
+    print(f'# {col}')
+    for d, n in rows:
+        print(f'  {n:4d}  {d}')
+if not found:
+    print('No folders found. Check --source or ingest documents first with: ./ingest.sh')
+"
+    exit 0
+fi
 
 # Mapping mode -> tier LLM (pilote la selection du modele dans llm_helper.py).
 # The default mode runs the adaptive cascade (rag -> multipass -> web -> full),

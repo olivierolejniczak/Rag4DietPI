@@ -3399,6 +3399,58 @@ def list_source_names(client, base_collection):
         for name in list_ingest_collections(client, base_collection)
         if name.startswith(prefix)
     )
+
+
+def list_folders(collection, docs_root, depth=None, host=None, page_size=256):
+    """Enumerate the distinct sub-folders present in a collection.
+
+    Deterministic: scrolls the stored payloads (no vector search) and derives
+    each point's directory from its "filepath", relative to docs_root. Useful
+    for surfacing entities encoded in the folder tree -- e.g. one
+    "Contrat <Name>" sub-folder per tenant -- which loosely-phrased semantic
+    queries miss.
+
+    Args:
+        collection: Qdrant collection to scan.
+        docs_root: documents root; folders are reported relative to it.
+        depth: if set, truncate each folder to this many path segments and
+               aggregate (e.g. depth=3 collapses to "<root>/<property>/<contrat>").
+        host: Qdrant HTTP base (defaults to QDRANT_HOST env).
+        page_size: scroll page size.
+
+    Returns:
+        list: sorted (relative_dir, file_count) tuples, file_count = number of
+              distinct files under that folder.
+    """
+    import requests
+    host = host or os.environ.get("QDRANT_HOST", "http://localhost:6333")
+    docs_root = os.path.abspath(docs_root)
+    url = f"{host}/collections/{collection}/points/scroll"
+    folders = {}
+    offset = None
+    while True:
+        body = {"limit": page_size, "with_payload": ["filepath"], "with_vector": False}
+        if offset is not None:
+            body["offset"] = offset
+        try:
+            resp = requests.post(url, json=body, timeout=15)
+        except Exception:
+            break
+        if resp.status_code != 200:
+            break
+        result = resp.json().get("result", {})
+        for pt in result.get("points", []):
+            fp = (pt.get("payload") or {}).get("filepath")
+            if not fp:
+                continue
+            rel_dir = os.path.dirname(os.path.relpath(fp, docs_root))
+            if depth:
+                rel_dir = os.sep.join(rel_dir.split(os.sep)[:depth])
+            folders.setdefault(rel_dir, set()).add(fp)
+        offset = result.get("next_page_offset")
+        if not offset:
+            break
+    return sorted((d, len(files)) for d, files in folders.items())
 EOFPY
 log_ok "collection_utils.py"
 
