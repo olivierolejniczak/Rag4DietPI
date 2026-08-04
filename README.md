@@ -373,4 +373,5 @@ MIT License - See [LICENSE](LICENSE) for details.
 - [FastEmbed](https://github.com/qdrant/fastembed) - Fast embeddings
 - [Unstructured.io](https://unstructured.io/) - Document parsing
 - [FlashRank](https://github.com/PrithivirajDamodaran/FlashRank) - Neural reranking
+- [btop](https://github.com/aristocratos/btop) - Resource monitor; handy for watching CPU/RAM during ingest and query
 - [DietPi](https://dietpi.com/) - Optimized Linux for SBCs
