@@ -36,6 +36,7 @@ Les embeddings passent en priorite par FastEmbed ; llama-swap (/v1/embeddings)
 n'est qu'un repli et doit rester dans le meme espace vectoriel (bge-base, 768-d).
 """
 import os
+import sys
 import requests
 import time
 from typing import Any, Dict, Optional
@@ -112,16 +113,24 @@ def get_config():
     }
 
 def llm_generate(prompt, max_tokens=500, timeout=None, temperature=None,
-                 response_format: Optional[ResponseFormat] = None):
+                 response_format: Optional[ResponseFormat] = None,
+                 model_override: Optional[str] = None):
     """Genere du texte via l'API OpenAI-compatible (/v1/chat/completions).
 
     response_format (optionnel) : objet OpenAI-compatible (ex. json_schema),
     serialise tel quel dans le payload JSON envoye a llama-server -> c'est
     forcement un dict (pas un modele Pydantic). Ignore par les backends qui ne
     le supportent pas.
+
+    model_override (optionnel) : force un modele llama-swap precis (ex.
+    "rag-quick") au lieu du tier actif - utilise par les etapes d'ingestion
+    (contextual retrieval) qui doivent rester sur le palier le moins cher
+    quel que soit le QUERY_MODE_ACTIVE courant.
     """
     global _debug_info
     config = get_config()
+    if model_override:
+        config["llm_model"] = model_override
 
     _debug_info["llm_model"] = config["llm_model"]
     _debug_info["llm_calls"] += 1
@@ -153,6 +162,7 @@ def llm_generate(prompt, max_tokens=500, timeout=None, temperature=None,
         payload["response_format"] = response_format
 
     start = time.time()
+    reason = "unknown error"
     for attempt in range(config["retries"] + 1):
         try:
             resp = requests.post(url, json=payload, timeout=req_timeout)
@@ -161,20 +171,27 @@ def llm_generate(prompt, max_tokens=500, timeout=None, temperature=None,
                 choices = resp.json().get("choices", [])
                 if choices:
                     return (choices[0].get("message", {}).get("content") or "").strip()
-                return None
+                reason = "backend returned no choices"
+                break
             # 502/503 : modele en cours de chargement -> on retente avec backoff.
             if resp.status_code in (502, 503) and attempt < config["retries"]:
                 time.sleep(2 * (attempt + 1))
                 continue
+            reason = f"HTTP {resp.status_code}: {resp.text[:200]}"
             break
         except requests.exceptions.Timeout:
+            reason = (f"timed out after {req_timeout}s "
+                      "(raise LLM_TIMEOUT_* or use a lighter --mode)")
             break
-        except requests.exceptions.RequestException:
+        except requests.exceptions.RequestException as e:
+            reason = f"request failed: {e}"
             if attempt < config["retries"]:
                 time.sleep(2 * (attempt + 1))
                 continue
             break
     _debug_info["llm_total_time"] += time.time() - start
+    print(f"[LLM] generation failed ({config['llm_model']}): {reason}",
+          file=sys.stderr)
     return None
 
 def llm_generate_fast(prompt, max_tokens=100):
@@ -1520,6 +1537,7 @@ def _hybrid_search_client(query, top_k=5, hyde_embedding=None, collection=None):
                     "filename": payload.get("filename", "unknown"),
                     "section": payload.get("section", ""),
                     "chunk_type": payload.get("chunk_type", "chunk"),
+                    "page_number": payload.get("page_number"),
                     "parser": payload.get("parser", "unknown"),
                     "sparse_model": payload.get("sparse_model", ""),
                 })
@@ -1612,6 +1630,7 @@ def _hybrid_search_http(query, top_k=5, hyde_embedding=None, collection=None):
                     "filename": payload.get("filename", "unknown"),
                     "section": payload.get("section", ""),
                     "chunk_type": payload.get("chunk_type", "chunk"),
+                    "page_number": payload.get("page_number"),
                     "parser": payload.get("parser", "unknown"),
                     "sparse_model": payload.get("sparse_model", ""),
                 })
@@ -4306,7 +4325,7 @@ def get_config():
         "tier_escalation_enabled": os.environ.get("REFLECTION_ENABLED", "false").lower() == "true",
         "tier_escalation_confidence_threshold": _float_env("REFLECTION_CONFIDENCE_THRESHOLD", 0.7),
         "tier_escalation_max_retries": _int_env("REFLECTION_MAX_RETRIES", 1),
-        "abstention_message": os.environ.get("ABSTENTION_MESSAGE",
+        "abstention_message": os.environ.get("ABSTENTION_MESSAGE", 
             "Je n'ai pas assez d'informations fiables pour repondre avec confiance."),
         
         # Hybrid search (hybrid)
@@ -4558,29 +4577,24 @@ def main(query):
             print(cached)
             return
 
-    # Fail fast with a clear message if the collection is not queryable, rather
-    # than returning a bare "No relevant documents found." for every failure.
-    from qdrant_client_helper import check_collection_status
-    coll_status = check_collection_status()
-    if coll_status["status"] == "unreachable":
-        print(f"[ERROR] Qdrant is unreachable: {coll_status['detail']}")
-        print("Check services with: ./status.sh")
-        return
-    if coll_status["status"] == "missing":
-        print(f"[ERROR] {coll_status['detail']}")
-        print("Ingest documents first with: ./ingest.sh")
-        return
+    # Fail fast with a clear message if nothing is queryable, rather than
+    # returning a bare "No relevant documents found." for every failure.
+    # Ingestion writes one collection per source folder ("<base>__<slug>"), so
+    # there is normally no bare base collection: validate the per-source
+    # collection when --source is given, otherwise require at least one
+    # per-folder collection to exist.
+    from qdrant_client_helper import check_collection_status, get_client
+    from collection_utils import list_ingest_collections, list_source_names
+    base_collection = os.environ.get("COLLECTION_NAME", "documents")
 
-    # Fail fast on an unknown --source too, instead of silently falling through
-    # to "No relevant documents found." -- list the valid folder names so a
-    # typo is obvious.
     if config.get("source"):
-        base_collection = os.environ.get("COLLECTION_NAME", "documents")
         source_collection = collection_for_source(config["source"], base_collection)
         source_status = check_collection_status(collection_name=source_collection)
+        if source_status["status"] == "unreachable":
+            print(f"[ERROR] Qdrant is unreachable: {source_status['detail']}")
+            print("Check services with: ./status.sh")
+            return
         if source_status["status"] == "missing":
-            from collection_utils import list_source_names
-            from qdrant_client_helper import get_client
             client, _mode = get_client()
             available = list_source_names(client, base_collection) if client else []
             print(f"[ERROR] Unknown --source '{config['source']}' (no collection '{source_collection}').")
@@ -4589,9 +4603,14 @@ def main(query):
             else:
                 print("No per-folder collections found yet. Ingest documents first with: ./ingest.sh")
             return
-        if source_status["status"] == "unreachable":
-            print(f"[ERROR] Qdrant is unreachable: {source_status['detail']}")
-            print("Check services with: ./status.sh")
+    else:
+        client, _mode = get_client()
+        if not client:
+            print("[ERROR] Qdrant is unreachable. Check services with: ./status.sh")
+            return
+        if not list_ingest_collections(client, base_collection):
+            print(f"[ERROR] No ingested collections found for '{base_collection}'.")
+            print("Ingest documents first with: ./ingest.sh")
             return
 
     # Get memory context (only if relevant to current query)
@@ -4793,6 +4812,7 @@ def main(query):
                 print(f"[ADAPTIVE] Forced full retrieval recovered an answer (score {full_conf:.2f})")
             elif verbose:
                 print("[ADAPTIVE] Forced full retrieval did not recover an answer")
+
 
     # reflection: LLM-tier escalation. Separate axis from the retrieval
     # cascade above - if the answer's groundedness is uncertain, regenerate
@@ -4999,6 +5019,9 @@ else:
     print('No per-folder collections found yet. Ingest documents first with: ./ingest.sh')
 "
             exit 0 ;;
+        --list-folders)
+            LIST_FOLDERS=1; shift
+            if [[ "${1:-}" =~ ^[0-9]+$ ]]; then FOLDERS_DEPTH="$1"; shift; fi ;;
         --no-memory) export MEMORY_ENABLED=false; shift ;;
         --no-cache) export QUERY_CACHE_ENABLED=false; shift ;;
         --clear-cache)
@@ -5044,6 +5067,9 @@ else:
             echo "  --source NAME Restrict to one top-level documents folder"
             echo "                (default: fan out across all folders, keep best)"
             echo "  --list-sources List available --source folder names and exit"
+            echo "  --list-folders [DEPTH]  List sub-folders in a source (with file"
+            echo "                counts) and exit; pair with --source. DEPTH limits"
+            echo "                path segments (e.g. 3 -> .../property/contrat)."
             echo ""
             echo "Whitelist (cache):"
             echo "  --whitelist-add TERM  Add term to spellcheck whitelist"
@@ -5061,6 +5087,38 @@ else:
 done
 
 QUERY=$(echo "$EXTRA_ARGS" | sed 's/^ *//')
+
+# --list-folders: deferred so --source is captured wherever it appears. Scrolls
+# the source collection's payloads and prints its folder tree (one "Contrat
+# <Name>" folder per tenant, etc.) -- deterministic, no LLM/vector search.
+if [ -n "${LIST_FOLDERS:-}" ]; then
+    python3 -c "
+import sys, os; sys.path.insert(0, './lib')
+from collection_utils import collection_for_source, list_ingest_collections, list_folders
+from qdrant_client_helper import get_client
+base = os.environ.get('COLLECTION_NAME', 'documents')
+docs = os.environ.get('DOCUMENTS_DIR', '/root/documents')
+depth = ${FOLDERS_DEPTH:-0} or None
+src = os.environ.get('SOURCE', '')
+if src:
+    cols = [collection_for_source(src, base)]
+else:
+    client, _m = get_client()
+    cols = list_ingest_collections(client, base) if client else [base]
+found = False
+for col in cols:
+    rows = [(d, n) for d, n in list_folders(col, docs, depth=depth) if d]
+    if not rows:
+        continue
+    found = True
+    print(f'# {col}')
+    for d, n in rows:
+        print(f'  {n:4d}  {d}')
+if not found:
+    print('No folders found. Check --source or ingest documents first with: ./ingest.sh')
+"
+    exit 0
+fi
 
 # Mapping mode -> tier LLM (pilote la selection du modele dans llm_helper.py).
 # The default mode runs the adaptive cascade (rag -> multipass -> web -> full),

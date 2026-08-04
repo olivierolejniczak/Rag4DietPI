@@ -302,88 +302,12 @@ if [ $QDRANT_RETRIES -eq $QDRANT_MAX_RETRIES ]; then
 fi
 
 # ============================================================================
-# PHASE 4: Ollama Installation
-# ============================================================================
-echo ""
-echo "=== Phase 4: Ollama LLM Server ==="
-
-if command -v ollama &> /dev/null; then
-    log_ok "Ollama installed: $(ollama --version 2>/dev/null || echo 'version unknown')"
-else
-    log_info "Ollama not found. Installing..."
-    # Download the installer fully before running it, so a truncated or failed
-    # download is never piped straight into sh mid-stream.
-    OLLAMA_INSTALLER="$(mktemp)"
-    if curl -fsSL https://ollama.com/install.sh -o "$OLLAMA_INSTALLER" && [ -s "$OLLAMA_INSTALLER" ]; then
-        sh "$OLLAMA_INSTALLER"
-        rm -f "$OLLAMA_INSTALLER"
-    else
-        rm -f "$OLLAMA_INSTALLER"
-        log_err "Failed to download Ollama installer"
-        exit 1
-    fi
-    
-    if command -v ollama &> /dev/null; then
-        log_ok "Ollama installed successfully"
-    else
-        log_err "Ollama installation failed"
-        exit 1
-    fi
-fi
-
-# Start Ollama service
-if curl -s --max-time 3 "${OLLAMA_HOST}/api/tags" > /dev/null 2>&1; then
-    log_ok "Ollama service already running"
-else
-    log_info "Starting Ollama service..."
-    
-    if systemctl list-unit-files | grep -q ollama; then
-        systemctl start ollama
-        systemctl enable ollama
-    else
-        nohup ollama serve > /var/log/ollama.log 2>&1 &
-    fi
-    
-    OLLAMA_RETRIES=0
-    OLLAMA_MAX_RETRIES=30
-    while [ $OLLAMA_RETRIES -lt $OLLAMA_MAX_RETRIES ]; do
-        if curl -s --max-time 3 "${OLLAMA_HOST}/api/tags" > /dev/null 2>&1; then
-            log_ok "Ollama service started"
-            break
-        fi
-        OLLAMA_RETRIES=$((OLLAMA_RETRIES + 1))
-        if [ $OLLAMA_RETRIES -lt $OLLAMA_MAX_RETRIES ]; then
-            echo "  Waiting for Ollama... ($OLLAMA_RETRIES/$OLLAMA_MAX_RETRIES)"
-            sleep 2
-        fi
-    done
-    
-    if [ $OLLAMA_RETRIES -eq $OLLAMA_MAX_RETRIES ]; then
-        log_err "Ollama failed to start. Check: cat /var/log/ollama.log"
-        exit 1
-    fi
-fi
-
-# Pull LLM model
-echo ""
-echo "Checking LLM model: $LLM_MODEL"
-if ollama list 2>/dev/null | grep -q "$LLM_MODEL"; then
-    log_ok "Model $LLM_MODEL already available"
-else
-    log_info "Pulling model $LLM_MODEL (this may take several minutes)..."
-    ollama pull "$LLM_MODEL"
-    
-    if ollama list 2>/dev/null | grep -q "$LLM_MODEL"; then
-        log_ok "Model $LLM_MODEL downloaded"
-    else
-        log_err "Failed to pull model $LLM_MODEL"
-        exit 1
-    fi
-fi
-
-# ============================================================================
 # PHASE 5: SearXNG Setup (Web Search)
 # ============================================================================
+# Note: Ollama install/model-pull previously lived here as Phase 4. The LLM
+# backend is now llama-swap + llama-server, set up by setup-rag-llm-backend.sh
+# (which also uninstalls any leftover Ollama), so this script no longer
+# touches Ollama at all.
 echo ""
 echo "=== Phase 5: SearXNG Web Search ==="
 
@@ -1377,12 +1301,6 @@ ERRORS=0
 echo -n "Qdrant: "
 curl -s --max-time 3 "http://localhost:${QDRANT_PORT}/collections" > /dev/null 2>&1 && log_ok "Running" || { log_err "Failed"; ERRORS=$((ERRORS+1)); }
 
-echo -n "Ollama: "
-curl -s --max-time 3 "${OLLAMA_HOST}/api/tags" > /dev/null 2>&1 && log_ok "Running" || { log_err "Failed"; ERRORS=$((ERRORS+1)); }
-
-echo -n "Model ($LLM_MODEL): "
-ollama list 2>/dev/null | grep -q "$LLM_MODEL" && log_ok "Available" || { log_err "Missing"; ERRORS=$((ERRORS+1)); }
-
 echo -n "FastEmbed: "
 python3 -c "from fastembed import TextEmbedding" 2>/dev/null && log_ok "OK" || { log_err "Missing"; ERRORS=$((ERRORS+1)); }
 
@@ -1400,8 +1318,9 @@ echo "System Profile:"
 echo "  RAM: ${RAM_GB}GB | CPUs: ${CPU_COUNT} @ ${CPU_MHZ}MHz"
 echo "  CPU Score: $CPU_SCORE | Arch: $ARCH_TYPE"
 echo ""
-echo "Services: Qdrant :${QDRANT_PORT} | Ollama :11434 | SearXNG :${SEARXNG_PORT}"
-echo "Model: $LLM_MODEL | Embedding: $FASTEMBED_MODEL ($EMBEDDING_DIM dim)"
+echo "Services: Qdrant :${QDRANT_PORT} | SearXNG :${SEARXNG_PORT}"
+echo "Embedding: $FASTEMBED_MODEL ($EMBEDDING_DIM dim)"
+echo "LLM backend: not yet installed, run setup-rag-llm-backend.sh next"
 echo "Spellcheck: pyspellchecker (FR: $FR_OK, EN: $EN_OK)"
 echo ""
 echo "System Features:"

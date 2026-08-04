@@ -37,7 +37,7 @@ cd /home/dietpi
 mkdir rag-system && cd rag-system
 
 # Copy setup scripts here, then run (in this order):
-sudo bash setup-rag-core.sh          # base deps (Docker, Qdrant, SearXNG, Ollama)
+sudo bash setup-rag-core.sh          # base deps (Docker, Qdrant, SearXNG)
 sudo bash setup-rag-llm-backend.sh   # migrate LLM backend to llama-swap + llama.cpp
 sudo bash setup-rag-ingest.sh
 sudo bash setup-rag-query.sh
