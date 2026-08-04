@@ -1301,12 +1301,6 @@ ERRORS=0
 echo -n "Qdrant: "
 curl -s --max-time 3 "http://localhost:${QDRANT_PORT}/collections" > /dev/null 2>&1 && log_ok "Running" || { log_err "Failed"; ERRORS=$((ERRORS+1)); }
 
-echo -n "Ollama: "
-curl -s --max-time 3 "${OLLAMA_HOST}/api/tags" > /dev/null 2>&1 && log_ok "Running" || { log_err "Failed"; ERRORS=$((ERRORS+1)); }
-
-echo -n "Model ($LLM_MODEL): "
-ollama list 2>/dev/null | grep -q "$LLM_MODEL" && log_ok "Available" || { log_err "Missing"; ERRORS=$((ERRORS+1)); }
-
 echo -n "FastEmbed: "
 python3 -c "from fastembed import TextEmbedding" 2>/dev/null && log_ok "OK" || { log_err "Missing"; ERRORS=$((ERRORS+1)); }
 
@@ -1324,8 +1318,9 @@ echo "System Profile:"
 echo "  RAM: ${RAM_GB}GB | CPUs: ${CPU_COUNT} @ ${CPU_MHZ}MHz"
 echo "  CPU Score: $CPU_SCORE | Arch: $ARCH_TYPE"
 echo ""
-echo "Services: Qdrant :${QDRANT_PORT} | Ollama :11434 | SearXNG :${SEARXNG_PORT}"
-echo "Model: $LLM_MODEL | Embedding: $FASTEMBED_MODEL ($EMBEDDING_DIM dim)"
+echo "Services: Qdrant :${QDRANT_PORT} | SearXNG :${SEARXNG_PORT}"
+echo "Embedding: $FASTEMBED_MODEL ($EMBEDDING_DIM dim)"
+echo "LLM backend: not yet installed, run setup-rag-llm-backend.sh next"
 echo "Spellcheck: pyspellchecker (FR: $FR_OK, EN: $EN_OK)"
 echo ""
 echo "System Features:"
