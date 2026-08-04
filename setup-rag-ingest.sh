@@ -38,6 +38,8 @@ import tempfile
 os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
 os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
 
+import table_structure
+
 def parse_csv_with_headers(file_path, ext=".csv"):
     """Parse CSV/TSV file, prepending column headers to each row for context
     
@@ -210,14 +212,32 @@ def parse_document(file_path, strategy="auto", ocr_languages="eng+fra"):
             return "", {"error": f"soffice odt conversion failed: {e}", "filename": os.path.basename(file_path)}
 
     try:
-        # Partition document
-        elements = partition(
-            filename=partition_path,
-            strategy=strategy,
-            languages=ocr_languages.split("+") if ocr_languages else None,
-            include_page_breaks=True,
-        )
-        
+        # tables: guarded hi_res + table-structure-inference pass, only for
+        # PDFs (skip_infer_table_types excludes PDFs from table inference by
+        # default, confirmed via partition()'s actual signature) and only
+        # when the size gate and the fast-vs-hires guard both pass - falls
+        # back to the plain partition() call below otherwise (veille GitHub,
+        # tache 6). Isolated variable: default parsing output is unchanged
+        # when the feature is off.
+        table_structure_mode = None
+        ext_lower = os.path.splitext(partition_path)[1].lower()
+        if (
+            ext_lower == ".pdf"
+            and table_structure.is_enabled()
+            and table_structure.should_apply(partition_path)
+        ):
+            elements, table_structure_mode = table_structure.parse_with_table_structure(
+                partition_path, ocr_languages.split("+") if ocr_languages else None,
+            )
+        else:
+            # Partition document
+            elements = partition(
+                filename=partition_path,
+                strategy=strategy,
+                languages=ocr_languages.split("+") if ocr_languages else None,
+                include_page_breaks=True,
+            )
+
         # Extract text and metadata
         text_parts = []
         metadata = {
@@ -226,31 +246,58 @@ def parse_document(file_path, strategy="auto", ocr_languages="eng+fra"):
             "element_count": len(elements),
             "element_types": {},
         }
+        if table_structure_mode:
+            metadata["table_structure_mode"] = table_structure_mode
         
+        # page: current_page was tracked here via PageBreak counting but never
+        # attached to the output text, so page boundaries were silently lost
+        # before chunking ever saw them (veille GitHub, tache 4). Gated behind
+        # PAGE_ALIGNED_CHUNKING_ENABLED so default parsing output is
+        # byte-for-byte unchanged when the feature is off (isolated variable).
+        page_aligned = os.environ.get("PAGE_ALIGNED_CHUNKING_ENABLED", "false").lower() == "true"
         current_page = 1
+        last_marked_page = None
         for element in elements:
             # Track element types
             elem_type = type(element).__name__
             metadata["element_types"][elem_type] = metadata["element_types"].get(elem_type, 0) + 1
-            
+
             # Handle page breaks
             if elem_type == "PageBreak":
                 current_page += 1
                 continue
-            
+
             # Get text content (element.__str__ returns self.text directly, which
             # can be None for some OCR'd elements and crashes str(element))
             text = getattr(element, "text", None) or ""
             if not text.strip():
                 continue
-            
+
+            if page_aligned:
+                # element.metadata.page_number is more reliable than the
+                # PageBreak counter above (works even when a parser doesn't
+                # emit PageBreak elements) - fall back to the counter only
+                # when it's missing.
+                page_number = getattr(getattr(element, "metadata", None), "page_number", None) or current_page
+                if page_number != last_marked_page:
+                    text_parts.append(f"\n\x0c[PAGE:{page_number}]\x0c\n")
+                    last_marked_page = page_number
+
             # Format based on element type
             if elem_type == "Title":
                 text_parts.append(f"\n## {text}\n")
             elif elem_type == "Header":
                 text_parts.append(f"\n### {text}\n")
             elif elem_type == "Table":
-                text_parts.append(f"\n[Table]\n{text}\n")
+                # tache 6: text_as_html (only populated when table structure
+                # inference ran) is flattened into pipe-delimited rows,
+                # which stays readable/citable - the raw .text for a Table
+                # element concatenates every cell with no row/column
+                # boundary (e.g. "Numero de 221 Date d'etablissement
+                # 05/09/2022" with no way to tell which value goes where).
+                html = getattr(getattr(element, "metadata", None), "text_as_html", None)
+                table_text = table_structure.html_table_to_text(html) if html else text
+                text_parts.append(f"\n[Table]\n{table_text}\n")
             elif elem_type == "Image":
                 text_parts.append(f"\n[Image: {text}]\n")
             elif elem_type == "ListItem":
@@ -286,6 +333,42 @@ cat > "$PROJECT_DIR/lib/smart_chunker.py" << 'EOFPY'
 
 import re
 import hashlib
+
+# page: matches the "\x0c[PAGE:N]\x0c" markers unstructured_parser.py inserts
+# into the text when PAGE_ALIGNED_CHUNKING_ENABLED=true (veille GitHub, tache 4).
+_PAGE_MARKER_RE = re.compile(r'\n?\x0c\[PAGE:(\d+)\]\x0c\n?')
+
+
+def smart_chunk_paginated(text, chunk_size=500, chunk_overlap=80, min_chunk_size=100, max_chunk_size=1200):
+    """Page-aligned variant of smart_chunk(): splits on the page markers
+    first, then runs smart_chunk() independently on each page's text, so no
+    chunk ever spans a page boundary and every chunk carries a page_number.
+
+    Falls back to plain smart_chunk() (page_number left unset) when the text
+    has no page markers - e.g. .txt/.docx sources with no page concept, or
+    when PAGE_ALIGNED_CHUNKING_ENABLED was off during parsing.
+    """
+    parts = _PAGE_MARKER_RE.split(text)
+    if len(parts) == 1:
+        return smart_chunk(text, chunk_size, chunk_overlap, min_chunk_size, max_chunk_size)
+
+    # re.split() with one capturing group returns [pre, page_num, page_text, page_num, page_text, ...]
+    chunks = []
+    pre = parts[0]
+    if pre.strip():
+        for c in smart_chunk(pre, chunk_size, chunk_overlap, min_chunk_size, max_chunk_size):
+            c["page_number"] = None
+            chunks.append(c)
+
+    for i in range(1, len(parts), 2):
+        page_number = int(parts[i])
+        page_text = parts[i + 1] if i + 1 < len(parts) else ""
+        for c in smart_chunk(page_text, chunk_size, chunk_overlap, min_chunk_size, max_chunk_size):
+            c["page_number"] = page_number
+            chunks.append(c)
+
+    return chunks
+
 
 def smart_chunk(text, chunk_size=500, chunk_overlap=80, min_chunk_size=100, max_chunk_size=1200):
     """Split text into semantic chunks
@@ -577,6 +660,352 @@ def get_embedding_dimension(model_name=None):
         "BAAI/bge-large-en-v1.5": 1024,
     }
     return dimensions.get(model_name, 768)
+EOFPY
+
+cat > "$PROJECT_DIR/lib/contextual_retrieval.py" << 'EOFPY'
+"""Contextual Retrieval (Anthropic) - contextual
+
+Prepends a short LLM-generated situating sentence to each chunk before it
+is embedded, so the vector carries document/section context that the raw
+chunk alone loses once split out of its document. Generated once at
+ingestion time, using the cheapest model tier (quick, 1.5b) to keep the
+added CPU cost low on a GPU-less machine. Only the text handed to the
+embedder is contextualized - the payload text shown to the LLM/user at
+query time is untouched (see ingest_main.py: display_text vs embed_text).
+
+Feature: CONTEXTUAL_RETRIEVAL_ENABLED (contextual)
+Introduced: contextual
+Lifecycle: EXPERIMENTAL - disabled by default pending a RAGAS before/after
+report on the local corpus (see task 1 of the veille GitHub roadmap).
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from llm_helper import llm_generate
+
+_PROMPT_TEMPLATE = """Voici un extrait d'un document plus large :
+
+<document>
+{doc_excerpt}
+</document>
+
+Voici un passage precis a situer dans ce document :
+<chunk>
+{chunk_text}
+</chunk>
+
+Redige une phrase courte (1 a 2 phrases, moins de 40 mots) qui situe ce passage dans le document (sujet du document, section concernee, de quoi parle le passage). Reponds uniquement avec cette phrase, dans la meme langue que le document, sans preambule ni guillemets."""
+
+
+def _int_env(key, default):
+    """int() d'une var d'env, tolerant une valeur absente/vide/invalide."""
+    try:
+        return int(os.environ.get(key, ""))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def is_enabled():
+    return os.environ.get("CONTEXTUAL_RETRIEVAL_ENABLED", "false").lower() == "true"
+
+
+def generate_chunk_context(document_text, chunk_text, debug=False):
+    """Renvoie une phrase de contexte pour chunk_text au sein de document_text.
+
+    Best-effort : toute erreur (backend indisponible, timeout, reponse vide)
+    renvoie "" plutot que de faire echouer l'ingestion - l'enrichissement
+    contextuel ne doit jamais etre un point de defaillance dur du pipeline.
+    """
+    doc_chars = _int_env("CONTEXTUAL_RETRIEVAL_DOC_CHARS", 2000)
+    max_tokens = _int_env("CONTEXTUAL_RETRIEVAL_MAX_TOKENS", 60)
+    timeout = _int_env("CONTEXTUAL_RETRIEVAL_TIMEOUT", 60)
+    model_override = os.environ.get("CONTEXTUAL_RETRIEVAL_MODEL", "rag-quick")
+
+    prompt = _PROMPT_TEMPLATE.format(
+        doc_excerpt=document_text[:doc_chars],
+        chunk_text=chunk_text[:1500],
+    )
+
+    try:
+        context = llm_generate(
+            prompt,
+            max_tokens=max_tokens,
+            timeout=timeout,
+            temperature=0.1,
+            model_override=model_override,
+        )
+    except Exception as exc:
+        if debug:
+            print(f"    [contextual] generation failed: {exc}")
+        return ""
+
+    if not context:
+        return ""
+    return context.strip().strip('"')
+
+
+def contextualize_chunks(document_text, chunks, debug=False):
+    """Ajoute embed_text (contexte + texte) a chaque chunk, in place.
+
+    chunks[i]["text"] reste le texte affiche/prompte a l'utilisateur.
+    chunks[i]["embed_text"] est ce qui doit etre passe a l'embedder (dense
+    et sparse). chunks[i]["context"] garde la phrase generee, pour
+    inspection/debug. Si la generation echoue pour un chunk donne,
+    embed_text retombe sur le texte brut (pas de degradation silencieuse
+    de l'embedding).
+    """
+    for i, chunk in enumerate(chunks, 1):
+        context = generate_chunk_context(document_text, chunk["text"], debug=debug)
+        chunk["context"] = context
+        if context:
+            chunk["embed_text"] = f"{context}\n\n{chunk['text']}"
+        else:
+            chunk["embed_text"] = chunk["text"]
+        if debug:
+            print(f"    [contextual] chunk {i}/{len(chunks)}: {context[:80] or '(vide, repli texte brut)'}")
+    return chunks
+EOFPY
+
+cat > "$PROJECT_DIR/lib/raptor.py" << 'EOFPY'
+"""RAPTOR-lite: recursive hierarchical summarization for long documents.
+
+Feature: RAPTOR_ENABLED (raptor)
+Introduced: raptor
+Lifecycle: EXPERIMENTAL - disabled by default pending a cost/benefit report
+on the local corpus (veille GitHub roadmap, tache 3).
+
+Builds a small tree of LLM-generated cluster summaries on top of a
+document's leaf chunks, so a multi-section synthesis question can be
+answered from a single summary node instead of requiring the retriever to
+piece together many scattered leaf chunks (parthsarthi03/raptor). Only
+applied above a document length threshold (RAPTOR_MIN_CHARS) to keep the
+added CPU cost bounded, and only ever uses the quick/default tier (never
+deep) for the recursive summarization passes - clustering is a lightweight
+numpy k-means (no sklearn dependency) since a single document only ever
+produces a handful of chunks to cluster.
+"""
+
+import math
+import os
+
+import numpy as np
+
+from embedding_helper import get_embeddings_batch
+from llm_helper import llm_generate
+
+_SUMMARY_PROMPT = """Voici plusieurs passages d'un meme document :
+
+{joined}
+
+Redige un resume synthetique (5 a 8 phrases) qui couvre les points cles communs a ces passages, dans la meme langue que les passages. Reponds uniquement avec le resume, sans preambule."""
+
+
+def _int_env(key, default):
+    try:
+        return int(os.environ.get(key, ""))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def is_enabled():
+    return os.environ.get("RAPTOR_ENABLED", "false").lower() == "true"
+
+
+def should_apply(document_text):
+    """Length-gated: RAPTOR only pays for itself on long, multi-section
+    documents - never run it on the whole corpus (contrainte negative)."""
+    min_chars = _int_env("RAPTOR_MIN_CHARS", 40000)
+    return len(document_text or "") >= min_chars
+
+
+def _kmeans(vectors, k, iters=15, seed=42):
+    rng = np.random.default_rng(seed)
+    X = np.array(vectors, dtype=float)
+    n = len(X)
+    k = max(1, min(k, n))
+    centroid_idx = rng.choice(n, k, replace=False)
+    centroids = X[centroid_idx]
+    labels = np.zeros(n, dtype=int)
+    for _ in range(iters):
+        dists = np.linalg.norm(X[:, None, :] - centroids[None, :, :], axis=2)
+        new_labels = dists.argmin(axis=1)
+        if np.array_equal(new_labels, labels):
+            break
+        labels = new_labels
+        for i in range(k):
+            members = X[labels == i]
+            if len(members):
+                centroids[i] = members.mean(axis=0)
+    return labels
+
+
+def _summarize_cluster(texts, model, max_tokens, timeout, debug=False):
+    joined = "\n\n---\n\n".join(t[:1500] for t in texts)[:6000]
+    prompt = _SUMMARY_PROMPT.format(joined=joined)
+    try:
+        summary = llm_generate(
+            prompt, max_tokens=max_tokens, timeout=timeout, temperature=0.2,
+            model_override=model,
+        )
+    except Exception as exc:
+        if debug:
+            print(f"    [raptor] summarization failed: {exc}")
+        return ""
+    return (summary or "").strip()
+
+
+def build_tree(leaf_chunks, debug=False):
+    """Build recursive cluster summaries over leaf_chunks (dicts with "text").
+
+    Returns a flat list of extra chunk dicts (chunk_type="raptor_summary",
+    tagged with their tree layer) to ingest alongside the leaves - never
+    mutates leaf_chunks.
+    """
+    model = os.environ.get("RAPTOR_MODEL", "rag-quick")
+    if model not in ("rag-quick", "rag-default"):
+        # contrainte negative: RAPTOR must never run on the deep tier
+        model = "rag-quick"
+    cluster_size = max(2, _int_env("RAPTOR_CLUSTER_SIZE", 5))
+    max_layers = _int_env("RAPTOR_MAX_LAYERS", 3)
+    max_tokens = _int_env("RAPTOR_SUMMARY_MAX_TOKENS", 200)
+    timeout = _int_env("RAPTOR_SUMMARY_TIMEOUT", 90)
+
+    extra_chunks = []
+    current_texts = [c["text"] for c in leaf_chunks]
+    layer = 1
+
+    while len(current_texts) > cluster_size and layer <= max_layers:
+        embeddings = get_embeddings_batch(current_texts)
+        k = max(1, math.ceil(len(current_texts) / cluster_size))
+        if k >= len(current_texts):
+            break
+        labels = _kmeans(embeddings, k)
+
+        next_texts = []
+        for cluster_id in range(k):
+            members = [t for t, lbl in zip(current_texts, labels) if lbl == cluster_id]
+            if not members:
+                continue
+            summary = _summarize_cluster(members, model, max_tokens, timeout, debug=debug)
+            if not summary:
+                continue
+            extra_chunks.append({
+                "text": summary,
+                "char_count": len(summary),
+                "type": "raptor_summary",
+                "raptor_layer": layer,
+                "raptor_source_count": len(members),
+            })
+            next_texts.append(summary)
+
+        if debug:
+            print(f"    [raptor] layer {layer}: {len(current_texts)} chunks -> {len(next_texts)} summaries")
+
+        if not next_texts or len(next_texts) >= len(current_texts):
+            break  # no compression happening this layer - stop, avoid infinite loop
+        current_texts = next_texts
+        layer += 1
+
+    return extra_chunks
+EOFPY
+
+cat > "$PROJECT_DIR/lib/table_structure.py" << 'EOFPY'
+"""Guarded table-structure inference for PDFs.
+
+Feature: TABLE_STRUCTURE_ENABLED (table_structure)
+Introduced: table_structure
+Lifecycle: EXPERIMENTAL - disabled by default pending a production rollout
+on folders known to contain tabular PDFs (veille GitHub roadmap, tache 6).
+
+parse_document()'s default partition() call never infers table structure for
+PDFs (skip_infer_table_types includes 'pdf' by default in Unstructured.io,
+confirmed by introspecting partition()'s actual signature rather than
+trusting the docs) - table cells get flattened into disconnected
+Text/Title/ListItem elements with no row/column structure. This module runs
+a cheap "fast" pass first to get a baseline element count, then a "hi_res"
+pass with table structure inference enabled, and only keeps the hi_res
+result if it doesn't look pathological (some PDFs are dominated by vector
+graphics/gradients that the hi_res layout model misreads as thousands of
+individual images - observed directly on a real 2-page datasheet PDF: 74
+elements at "fast" vs 4680 at "hi_res", 4632 of them spurious Image
+elements). When the guard trips, or the file is too large to risk the hi_res
+pass at all, falls back to the plain fast-pass elements - i.e. parsing stays
+at least as good as the current default, never worse.
+"""
+
+import os
+
+from bs4 import BeautifulSoup
+
+
+def _int_env(key, default):
+    try:
+        return int(os.environ.get(key, ""))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def is_enabled():
+    return os.environ.get("TABLE_STRUCTURE_ENABLED", "false").lower() == "true"
+
+
+def should_apply(file_path):
+    """Size-gated: skip the extra hi_res pass outright on very large PDFs,
+    bounding worst-case cost before even trying (veille GitHub tache 6 -
+    the guard below already catches pathological *content*, this catches
+    pathological *size* before paying for the fast pass that feeds it)."""
+    max_mb = _int_env("TABLE_STRUCTURE_MAX_FILE_MB", 20)
+    try:
+        size_mb = os.path.getsize(file_path) / (1024 * 1024)
+    except OSError:
+        return False
+    return size_mb <= max_mb
+
+
+def html_table_to_text(html):
+    """Flatten a Table element's text_as_html into readable pipe-delimited
+    rows, instead of the raw concatenated cell text unstructured falls back
+    to (which loses row boundaries entirely, e.g. 'Numero de 221 Date
+    d'etablissement 05/09/2022' with no way to tell which value belongs to
+    which label)."""
+    soup = BeautifulSoup(html, "html.parser")
+    rows = []
+    for tr in soup.find_all("tr"):
+        cells = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
+        cells = [c for c in cells if c]
+        if cells:
+            rows.append(" | ".join(cells))
+    return "\n".join(rows)
+
+
+def parse_with_table_structure(file_path, languages):
+    """Guarded dual-pass parse. Returns (elements, mode) where mode is
+    "hi_res+table_structure" or "fast (guard fallback)" for diagnostics.
+    Caller (unstructured_parser.py) renders `elements` exactly like the
+    plain partition() result, except Table elements carry text_as_html for
+    the caller to convert via html_table_to_text()."""
+    from unstructured.partition.auto import partition
+
+    guard_multiplier = _int_env("TABLE_STRUCTURE_GUARD_MULTIPLIER", 8)
+    guard_max_images = _int_env("TABLE_STRUCTURE_GUARD_MAX_IMAGES", 50)
+
+    fast_elements = partition(filename=file_path, strategy="fast", languages=languages, include_page_breaks=True)
+    hires_elements = partition(
+        filename=file_path, strategy="hi_res", languages=languages,
+        skip_infer_table_types=[], include_page_breaks=True,
+    )
+
+    n_fast = len(fast_elements)
+    n_hires = len(hires_elements)
+    n_images_hires = sum(1 for e in hires_elements if type(e).__name__ == "Image")
+
+    guard_triggered = (n_hires > guard_multiplier * max(n_fast, 1)) or (n_images_hires > guard_max_images)
+
+    if guard_triggered:
+        return fast_elements, "fast (guard fallback)"
+    return hires_elements, "hi_res+table_structure"
 EOFPY
 log_ok "embedding_helper.py"
 
@@ -3006,8 +3435,15 @@ os.environ.setdefault("UNSTRUCTURED_USE_GPU", "false")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from unstructured_parser import parse_document, get_supported_extensions
-from smart_chunker import smart_chunk
+from smart_chunker import smart_chunk, smart_chunk_paginated
 from embedding_helper import get_embedding, get_embeddings_batch, get_embedding_dimension
+
+# contextual: Anthropic-style contextual retrieval (contextualize embedding
+# input only, leave the payload text shown to the user/LLM untouched)
+from contextual_retrieval import is_enabled as contextual_retrieval_enabled, contextualize_chunks
+
+# raptor: recursive cluster summaries for long, multi-section documents
+from raptor import is_enabled as raptor_enabled, should_apply as raptor_should_apply, build_tree as raptor_build_tree
 
 # collections: one Qdrant collection per top-level folder under the
 # documents root, so unrelated document sets never leak into each other's
@@ -3045,18 +3481,22 @@ from doc_dedup import (
     get_doc_index_stats,
 )
 
-# title: filenames often carry identifying info that never appears in the body
-# text itself (e.g. a filename naming a person, date, or location). That info
-# lives only in Qdrant payload metadata otherwise, so it's invisible to
-# embeddings and to the LLM unless --citations is passed - and even then the
-# model won't reliably treat a bracketed filename as a factual claim.
+# title: filenames and their parent folders often carry identifying info that
+# never appears in the body text itself (e.g. a folder naming a property, a
+# filename naming a person, date, or location). That info lives only in
+# Qdrant payload metadata otherwise, so it's invisible to embeddings and to
+# the LLM unless --citations is passed - and even then the model won't
+# reliably treat a bracketed filename as a factual claim.
 # Baking a readable title into the chunk text makes it real, searchable content.
-def derive_filename_title(filename):
-    """Turn a filename into a readable title line (strip extension, normalize separators)."""
-    name = os.path.splitext(filename)[0]
-    name = re.sub(r'[_\-]+', ' ', name).strip()
-    name = re.sub(r'\s+', ' ', name)
-    return name
+def derive_filename_title(rel_path):
+    """Turn a path (relative to the documents root, may include parent
+    folders) into a readable title line - strips the extension, normalizes
+    underscores/dashes within each segment, and joins folder segments with
+    " / " so identifying info in parent folder names isn't lost."""
+    rel_path = os.path.splitext(rel_path)[0]
+    segments = [s for s in rel_path.split(os.sep) if s not in ("", ".", "..")]
+    segments = [re.sub(r'\s+', ' ', re.sub(r'[_\-]+', ' ', s)).strip() for s in segments]
+    return " / ".join(s for s in segments if s)
 
 def _int_env(key, default):
     """int() an env var, tolerating a missing/blank/invalid value."""
@@ -3064,6 +3504,9 @@ def _int_env(key, default):
         return int(os.environ.get(key, ""))
     except (TypeError, ValueError):
         return int(default)
+
+def page_aligned_chunking_enabled():
+    return os.environ.get("PAGE_ALIGNED_CHUNKING_ENABLED", "false").lower() == "true"
 
 def get_file_hash(file_path):
     """Calculate MD5 hash of file"""
@@ -3110,7 +3553,16 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
     """
     filename = os.path.basename(file_path)
     sparse_enabled = os.environ.get("SPARSE_EMBED_ENABLED", "true").lower() == "true"
-    
+
+    # title: path relative to the documents root, when resolvable - carries
+    # parent folder names (property/tenant identity, etc.) into the title.
+    # Falls back to the bare filename for files outside docs_root or when
+    # DOCUMENTS_DIR isn't set up as an ancestor (e.g. one-off --url ingests).
+    docs_root = os.environ.get("DOCUMENTS_DIR", "./documents")
+    rel_path = os.path.relpath(os.path.abspath(file_path), os.path.abspath(docs_root))
+    if rel_path.startswith(".."):
+        rel_path = filename
+
     # Check if already processed
     if not force and is_file_processed(file_path):
         return {"status": "skipped", "filename": filename, "reason": "already processed"}
@@ -3142,8 +3594,12 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
                 "reason": f"duplicate content (same as {original_file})"
             }
     
-    # Chunk text
-    chunks = smart_chunk(
+    # Chunk text. page: page-aligned chunking never merges content across a
+    # page boundary and tags each chunk with page_number (requires the parser
+    # to have inserted page markers, i.e. PAGE_ALIGNED_CHUNKING_ENABLED=true -
+    # falls back to plain smart_chunk() output otherwise, see smart_chunker.py).
+    chunker = smart_chunk_paginated if page_aligned_chunking_enabled() else smart_chunk
+    chunks = chunker(
         text,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
@@ -3157,11 +3613,33 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
     # title: prepend a readable title line derived from the filename to every
     # chunk's text, so identifying info that only lives in the filename (names,
     # addresses, etc.) becomes real embedded/retrievable/promptable content.
-    title = derive_filename_title(filename)
+    title = derive_filename_title(rel_path)
     if title:
         for c in chunks:
             c["text"] = f"[Document : {title}]\n\n{c['text']}"
             c["char_count"] = len(c["text"])
+
+    # contextual: generate a short situating sentence per chunk with the
+    # cheapest model tier, and embed contexte+chunk instead of the chunk
+    # alone. The payload "text" below stays the plain chunk (with title),
+    # unchanged - only the embedding input is contextualized.
+    if contextual_retrieval_enabled():
+        t_ctx_start = time.time()
+        contextualize_chunks(text, chunks, debug=debug)
+        if debug:
+            print(f"    [contextual] {len(chunks)} chunks contextualises en {time.time() - t_ctx_start:.1f}s")
+
+    # raptor: build recursive cluster summaries on long documents only, so
+    # multi-section synthesis questions can hit a summary node directly.
+    # Runs after contextual retrieval so summary nodes (already synthetic)
+    # never themselves get contextualized. Added as plain extra chunks -
+    # embedded/uploaded through the exact same path as leaf chunks below.
+    if raptor_enabled() and raptor_should_apply(text):
+        t_raptor_start = time.time()
+        raptor_chunks = raptor_build_tree(chunks, debug=debug)
+        chunks.extend(raptor_chunks)
+        if debug:
+            print(f"    [raptor] {len(raptor_chunks)} resumes generes en {time.time() - t_raptor_start:.1f}s")
 
     # Ensure collection exists (hybrid: hybrid collection with named vectors)
     dimension = get_embedding_dimension()
@@ -3181,12 +3659,14 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
     else:
         ensure_collection(qdrant_host, collection_name, dimension)
     
-    # Generate embeddings
-    texts = [c["text"] for c in chunks]
-    
+    # Generate embeddings. contextual: embed_text (contexte+chunk) when
+    # present, falling back to the plain chunk text otherwise - dense and
+    # sparse both benefit from the added context per Anthropic's paper.
+    texts = [c.get("embed_text") or c["text"] for c in chunks]
+
     # Dense embeddings
     dense_embeddings = get_embeddings_batch(texts)
-    
+
     # Sparse embeddings (hybrid)
     sparse_embeddings = None
     if sparse_enabled and is_sparse_embed_available():
@@ -3216,6 +3696,9 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
                     "char_count": chunk.get("char_count", len(chunk["text"])),
                     "parser": "unstructured",
                     "sparse_model": os.environ.get("SPARSE_EMBED_MODEL", "prithivida/Splade_PP_en_v1"),
+                    "context": chunk.get("context") or None,
+                    "raptor_layer": chunk.get("raptor_layer"),
+                    "page_number": chunk.get("page_number"),
                     "ingested_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 }
             })
@@ -3238,10 +3721,13 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
                     "chunk_type": chunk.get("type", "unknown"),
                     "char_count": chunk.get("char_count", len(chunk["text"])),
                     "parser": "unstructured",
+                    "context": chunk.get("context") or None,
+                    "raptor_layer": chunk.get("raptor_layer"),
+                    "page_number": chunk.get("page_number"),
                     "ingested_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 }
             })
-        
+
         batch_size = _int_env("QDRANT_BATCH_SIZE", 100)
         success = upload_points(qdrant_host, collection_name, points, batch_size)
     

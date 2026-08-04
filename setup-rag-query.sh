@@ -112,16 +112,24 @@ def get_config():
     }
 
 def llm_generate(prompt, max_tokens=500, timeout=None, temperature=None,
-                 response_format: Optional[ResponseFormat] = None):
+                 response_format: Optional[ResponseFormat] = None,
+                 model_override: Optional[str] = None):
     """Genere du texte via l'API OpenAI-compatible (/v1/chat/completions).
 
     response_format (optionnel) : objet OpenAI-compatible (ex. json_schema),
     serialise tel quel dans le payload JSON envoye a llama-server -> c'est
     forcement un dict (pas un modele Pydantic). Ignore par les backends qui ne
     le supportent pas.
+
+    model_override (optionnel) : force un modele llama-swap precis (ex.
+    "rag-quick") au lieu du tier actif - utilise par les etapes d'ingestion
+    (contextual retrieval) qui doivent rester sur le palier le moins cher
+    quel que soit le QUERY_MODE_ACTIVE courant.
     """
     global _debug_info
     config = get_config()
+    if model_override:
+        config["llm_model"] = model_override
 
     _debug_info["llm_model"] = config["llm_model"]
     _debug_info["llm_calls"] += 1
@@ -1520,6 +1528,7 @@ def _hybrid_search_client(query, top_k=5, hyde_embedding=None, collection=None):
                     "filename": payload.get("filename", "unknown"),
                     "section": payload.get("section", ""),
                     "chunk_type": payload.get("chunk_type", "chunk"),
+                    "page_number": payload.get("page_number"),
                     "parser": payload.get("parser", "unknown"),
                     "sparse_model": payload.get("sparse_model", ""),
                 })
@@ -1612,6 +1621,7 @@ def _hybrid_search_http(query, top_k=5, hyde_embedding=None, collection=None):
                     "filename": payload.get("filename", "unknown"),
                     "section": payload.get("section", ""),
                     "chunk_type": payload.get("chunk_type", "chunk"),
+                    "page_number": payload.get("page_number"),
                     "parser": payload.get("parser", "unknown"),
                     "sparse_model": payload.get("sparse_model", ""),
                 })
@@ -4306,7 +4316,7 @@ def get_config():
         "tier_escalation_enabled": os.environ.get("REFLECTION_ENABLED", "false").lower() == "true",
         "tier_escalation_confidence_threshold": _float_env("REFLECTION_CONFIDENCE_THRESHOLD", 0.7),
         "tier_escalation_max_retries": _int_env("REFLECTION_MAX_RETRIES", 1),
-        "abstention_message": os.environ.get("ABSTENTION_MESSAGE",
+        "abstention_message": os.environ.get("ABSTENTION_MESSAGE", 
             "Je n'ai pas assez d'informations fiables pour repondre avec confiance."),
         
         # Hybrid search (hybrid)
@@ -4793,6 +4803,7 @@ def main(query):
                 print(f"[ADAPTIVE] Forced full retrieval recovered an answer (score {full_conf:.2f})")
             elif verbose:
                 print("[ADAPTIVE] Forced full retrieval did not recover an answer")
+
 
     # reflection: LLM-tier escalation. Separate axis from the retrieval
     # cascade above - if the answer's groundedness is uncertain, regenerate
