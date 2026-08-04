@@ -23,7 +23,7 @@ This project was developed and tested primarily on [DietPi](https://dietpi.com/)
 |--------|---------|
 | **Minimal footprint** | ~400MB base install vs 2GB+ for standard Debian |
 | **Optimized for SBCs** | Pre-configured for Raspberry Pi, Odroid, etc. |
-| **Software catalog** | Easy Docker/Ollama installation via `dietpi-software` |
+| **Software catalog** | Easy Docker installation via `dietpi-software` |
 | **RAM efficiency** | Critical when running LLMs + vector DB on 4-8GB |
 | **Headless optimized** | Perfect for server deployments |
 
@@ -90,7 +90,7 @@ git clone https://github.com/olivierolejniczak/Rag4DietPI.git
 cd Rag4DietPI
 
 # Run setup scripts (as root or with sudo)
-sudo bash setup-rag-core.sh          # base deps (Docker, Qdrant, SearXNG, Ollama)
+sudo bash setup-rag-core.sh          # base deps (Docker, Qdrant, SearXNG)
 sudo bash setup-rag-llm-backend.sh   # migrate LLM backend to llama-swap + llama.cpp
 sudo bash setup-rag-ingest.sh
 sudo bash setup-rag-query.sh
@@ -138,20 +138,21 @@ sudo bash setup-rag-query.sh
 
 ## System Requirements
 
+Embeddings are fixed at FastEmbed `bge-base-en-v1.5` (768 dim) on every tier, so
+the vector space stays consistent regardless of hardware. Only the LLM tiers that
+fit the RAM budget are downloaded.
+
 ### Minimum (4GB RAM)
-- Model: qwen2.5:1.5b
-- Embedding: bge-small-en (384 dim)
+- LLM tiers: `rag-quick` only (qwen2.5-1.5b-instruct)
 - Batch size: 32
 - Swap: 4GB recommended
 
 ### Recommended (8GB RAM)
-- Model: qwen2.5:3b
-- Embedding: bge-base-en (768 dim)
+- LLM tiers: `rag-quick` + `rag-default` (qwen2.5-3b-instruct)
 - Batch size: 64
 
 ### Optimal (16GB+ RAM)
-- Model: qwen2.5:7b
-- Embedding: bge-large-en (1024 dim)
+- LLM tiers: `rag-quick` + `rag-default` + `rag-deep` (Qwen3-4B-Instruct-2507)
 - Batch size: 96
 
 ## Architecture
@@ -190,10 +191,11 @@ tiers map to three models, loaded only when used and unloaded after a TTL:
 |-----------------|------------------|---------------|
 | `quick` / `--ultrafast` | `rag-quick`   | qwen2.5-1.5b-instruct |
 | `default`               | `rag-default` | qwen2.5-3b-instruct   |
-| `deep` / `--full`       | `rag-deep`    | qwen2.5-7b-instruct   |
+| `deep` / `--full`       | `rag-deep`    | Qwen3-4B-Instruct-2507 |
 
-Which models are downloaded depends on detected RAM (4GB → 1.5b only; 8GB → +3b;
-16GB+ → +7b). Embeddings use FastEmbed (`bge-base-en-v1.5`, 768-d) as the primary
+Which models are downloaded depends on the available RAM budget (total RAM minus
+a reserve): the 1.5b is always fetched; the 3b and 4b are added only if they fit.
+Embeddings use FastEmbed (`bge-base-en-v1.5`, 768-d) as the primary
 source; llama-swap serves a matching `bge-base` GGUF (`rag-embed`) only as a
 fallback, so the vector space stays consistent and no re-ingest is needed.
 
@@ -226,7 +228,7 @@ QUERY_CACHE_TTL=3600
 
 | Script | Description |
 |--------|-------------|
-| `setup-rag-core.sh` | Install core dependencies (Docker, Qdrant, Ollama, SearXNG) |
+| `setup-rag-core.sh` | Install core dependencies (Docker, Qdrant, SearXNG) |
 | `setup-rag-llm-backend.sh` | Migrate LLM backend from Ollama to llama-swap + llama.cpp |
 | `setup-rag-ingest.sh` | Create document ingestion pipeline |
 | `setup-rag-query.sh` | Create query processing pipeline |
