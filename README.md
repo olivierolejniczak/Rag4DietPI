@@ -136,6 +136,23 @@ sudo bash setup-rag-query.sh
 ./query.sh --mode deep "complex analysis"   # ~3-5min
 ```
 
+### Browsing sources and folders
+
+Documents are stored one collection per top-level folder. List them, or browse
+the sub-folder tree of a source (deterministic, no LLM) — useful for facts that
+live in the directory structure rather than in document text:
+
+```bash
+# List available --source values
+./query.sh --list-sources
+
+# List a source's sub-folders with file counts (pair with --source)
+./query.sh --source contracts --list-folders
+
+# Cap the depth (e.g. 3 path segments) for a summary view
+./query.sh --source contracts --list-folders 3
+```
+
 ## System Requirements
 
 Embeddings are fixed at FastEmbed `bge-base-en-v1.5` (768 dim) on every tier, so
