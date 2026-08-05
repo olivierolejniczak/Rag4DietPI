@@ -124,20 +124,32 @@ For non-DietPi systems, simply:
 - Linux (Debian/Ubuntu/DietPi)
 - 4GB+ RAM (8GB+ recommended)
 - 20GB+ free disk space
-- Docker installed
+- **Docker** — this project **does require Docker**: the vector database (Qdrant)
+  and the private web search (SearXNG) each run as a Docker container. You install
+  Docker itself once (on DietPi: `sudo dietpi-software` → search "docker" → select
+  *Docker Compose*; elsewhere: `curl -fsSL https://get.docker.com | sh`). The setup
+  script below checks it's there and tells you exactly what to do if it isn't.
 
 ### Installation
+
+> **You do not need to know anything about AI, embeddings, or document
+> processing to install this.** The setup scripts do all the heavy lifting for
+> you — they download and configure Docker containers (Qdrant, SearXNG), pull the
+> language models and the embedding models, install every Python dependency, and
+> write all the config. You run four commands and wait; there is nothing to tune
+> by hand to get a working system.
 
 ```bash
 # Clone the repository
 git clone https://github.com/olivierolejniczak/Rag4DietPI.git
 cd Rag4DietPI
 
-# Run setup scripts (as root or with sudo)
-sudo bash setup-rag-core.sh          # base deps (Docker, Qdrant, SearXNG)
-sudo bash setup-rag-llm-backend.sh   # migrate LLM backend to llama-swap + llama.cpp
-sudo bash setup-rag-ingest.sh
-sudo bash setup-rag-query.sh
+# Run the setup scripts (as root or with sudo). Each is self-contained and
+# downloads + configures its part; you don't edit anything in between.
+sudo bash setup-rag-core.sh          # Qdrant + SearXNG containers, system deps
+sudo bash setup-rag-llm-backend.sh   # llama-swap + llama.cpp, downloads the models
+sudo bash setup-rag-ingest.sh        # document parsing/embedding pipeline
+sudo bash setup-rag-query.sh         # query pipeline + wrappers
 
 # Verify installation
 ./status.sh
@@ -244,6 +256,38 @@ By default `query.sh` runs an **adaptive cascade** (multi-level, multi-model): i
 starts cheap and only escalates if the retrieved evidence isn't good enough,
 swapping up to a bigger model tier as it climbs. This is the "multi-level, multi
 model" core — you pay for a big model only when a question actually needs it.
+
+#### How the cascade decides to "level up"
+
+The system doesn't blindly run every stage. Between levels it stops and asks
+*"is this good enough yet?"* using two cheap, automatic checks — no extra LLM call
+and no human in the loop:
+
+1. **Before answering — is the retrieved evidence relevant enough?**
+   After each retrieval stage the system scores the chunks it found with a
+   **confidence score** that blends two signals: (a) how much the question's own
+   words actually appear in the retrieved passages (lexical overlap), and (b) the
+   search engine's own similarity/ranking score for those passages. If that blended
+   score clears the bar (`ESCALATE_CONFIDENCE_MIN`, default **0.35**), the evidence
+   is judged sufficient and the cascade stops climbing. If it's below the bar, the
+   system escalates to the next, more expensive retrieval level
+   (**RAG → +multi-pass query rewriting → +web search → full**), keeping the best
+   result found so far at each step.
+
+2. **After answering — is the answer actually grounded in that evidence?**
+   Once the model drafts an answer, a **grounding check** (the `REFLECTION_ENABLED`
+   feature) measures what fraction of the answer's sentences are genuinely supported
+   by the retrieved text. If that groundedness is below `REFLECTION_CONFIDENCE_THRESHOLD`
+   (default **0.7**) — i.e. the answer looks partly invented — the system doesn't
+   just retry the same model; it **regenerates with the next model tier up**
+   (`quick → default → deep`), up to `REFLECTION_MAX_RETRIES` times. And if the
+   answer amounts to *"I couldn't find this"*, it forces one jump straight to the
+   full tier before giving up.
+
+In short: **relevance of the evidence gates *whether to retrieve harder*, and
+groundedness of the answer gates *whether to think harder with a bigger model*.**
+Every threshold above is a tunable in `config.env`, so you can make the system more
+eager to escalate (higher quality, slower) or more frugal (faster, cheaper).
 
 **Modes (pick the entry point):**
 
@@ -487,17 +531,40 @@ QUERY_CACHE_ENABLED=true
 QUERY_CACHE_TTL=3600
 ```
 
-### Why those feature defaults?
+### Why those feature defaults? (in plain terms)
 
-These four defaults are the result of actual measurement on this box (see the
-opt-in [`benchmark/`](benchmark/) BEIR harness), not guesses:
+You don't have to touch any of these to get a good system — they already ship the
+way that worked best when actually measured on this machine (see the opt-in
+[`benchmark/`](benchmark/) harness). Here's what each one does, without the jargon:
 
-| Setting | Default | Why |
-|---------|---------|-----|
-| `HYBRID_SEARCH_MODE` | `native` | Fusion of dense + sparse results is done **server-side inside Qdrant** (native RRF) rather than in Python. It's the fast path — one query round-trip, fusion happens next to the data — and it's why hybrid search adds negligible latency over dense-only. |
-| `RERANK_ENABLED` | `false` | The cross-encoder reranker (`ms-marco-MiniLM`) **consistently *lowered* nDCG in benchmarks** (−0.024 to −0.063 across datasets) while adding **~1000× the retrieval latency** (~6 s/query). It's an English MS-MARCO model, out-of-domain on most real corpora. Off by default; flip it on only if you've measured a gain on *your* data. |
-| `CRAG_ENABLED` | `false` | Corrective RAG falls back to a **web search** (SearXNG) when local evidence is weak — but that adds latency and an external dependency, and the local metasearch is the weakest link. Kept off for the default fast/offline path; opt in per-query with `--full`. |
-| `REFLECTION_ENABLED` | `true` | A cheap self-check on whether the drafted answer is actually **grounded** in the retrieved context. If it isn't, the pipeline regenerates **at the next tier up** instead of re-rolling the same model. Low-cost hallucination insurance — the one quality feature that earns its keep by default. |
+| Setting | Default | In plain terms |
+|---------|---------|----------------|
+| `HYBRID_SEARCH_MODE` | `native` | The system searches two ways at once — by **meaning** and by **exact keywords** — and has to merge the two result lists. `native` means the database (Qdrant) does that merging itself, which is the fast way. **Leave it on.** |
+| `RERANK_ENABLED` | `false` | An optional extra step that re-sorts the search results with a second, heavier model. It sounds helpful, but in testing it **made answers slightly *worse* while making every query dramatically slower** (seconds instead of milliseconds). So it's **off**. Only turn it on if you test your own documents and see it actually help. |
+| `CRAG_ENABLED` | `false` | "If my own documents don't have the answer, go search the **web** instead." Useful sometimes, but it makes queries slower and depends on an internet search working well — so it's **off by default** to keep things fast and fully offline. You can switch it on for a single question with `--full`. |
+| `REFLECTION_ENABLED` | `true` | A quick **self-check**: after writing an answer, the system verifies the answer is really backed by your documents and isn't made up. If it looks shaky, it automatically **retries with a smarter (bigger) model** instead of trusting the first draft. It's cheap and catches hallucinations, so it's **on** — the one quality feature worth having by default. |
+
+### The built-in web search (SearXNG)
+
+When web fallback is used (`--full` or `CRAG_ENABLED=true`), the system does **not**
+call Google's or Bing's paid APIs directly. Instead it runs its own private copy of
+**[SearXNG](https://github.com/searxng/searxng)** — a self-hosted "metasearch"
+engine — in a Docker container. SearXNG forwards the question to several public
+search engines, collects the results, and hands them back with **no API keys, no
+tracking, and no account**. The setup script installs and configures it for you;
+the defaults it ships with are:
+
+| SearXNG default | Value | Meaning |
+|-----------------|-------|---------|
+| Search engines | Google, DuckDuckGo, Bing, Wikipedia | Where web results are gathered from. |
+| Result format | HTML **+ JSON** | JSON is enabled so the RAG pipeline can read results programmatically. |
+| Default language | `fr-FR` | Matches the French-first use case (`ANSWER_LANG=fr`); change it to your language. |
+| Safe search | `0` (off) | No result filtering. |
+| Rate limiter | off | Fine because it's local and only *you* query it. |
+| Port | `8085` (host) → `8080` (container) | Reachable at `http://localhost:8085`. |
+
+All of this lives in `setup-rag-core.sh` and is written once to
+`settings.yml`; you never have to configure a search provider by hand.
 
 ## Scripts Reference
 
@@ -527,7 +594,7 @@ opt-in [`benchmark/`](benchmark/) BEIR harness), not guesses:
 | Map/Reduce Summary | ✅ | ❌ | ❌ | ❌ |
 | Self-Reflection | ✅ | ❌ | ✅ | ❌ |
 | SBC/ARM Support | ✅ | ⚠️ | ❌ | ❌ |
-| Docker Compose | ❌ | ✅ | ✅ | ✅ |
+| Runs on Docker | ✅ Qdrant + SearXNG (plain `docker run`, no compose file) | ✅ | ✅ | ✅ |
 
 ## Troubleshooting
 
