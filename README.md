@@ -334,6 +334,49 @@ eager to escalate (higher quality, slower) or more frugal (faster, cheaper).
 ./cache-stats.sh                             # query-cache hit stats
 ```
 
+### Experimental: agentic deep tier (`agentic-query.sh`)
+
+`query.sh`'s `--full` (deep) tier always runs the same fixed sequence:
+classify → decompose → HyDE/stepback → hybrid retrieval → rerank → CRAG web
+fallback → reflection. `agentic-query.sh` is a parallel, opt-in clone that
+lets the model itself decide, ReAct-style, whether to call
+`retrieve_documents` / `web_search` or just answer — instead of always
+running that fixed sequence. It never touches `query.sh` or its pipeline;
+if the agentic loop fails for any reason (missing dependency, backend
+error, step budget exhausted with no answer) it transparently falls back
+to the exact same fixed pipeline `query.sh --full` uses.
+
+```bash
+./setup-rag-agentic-query.sh "$PROJECT_DIR"   # generates agentic-query.sh + lib/agentic_deep.py
+AGENTIC_DEEP_ENABLED=true ./agentic-query.sh --full "your question"
+# or force it per-call regardless of config.env:
+./agentic-query.sh --full --agentic "your question"
+```
+
+**Category-gated by default.** A same-corpus comparison (18 questions,
+factual/comparative/procedural/multi-hop, English-pinned) found the loop is
+a clear win on factual questions — matches the fixed pipeline's answer
+quality while using fewer LLM calls and finishing *faster* — but on
+comparative/procedural/multi-hop questions it trades noticeably better
+answers for 2–3x the latency (one outlier took 400+ seconds). So
+`AGENTIC_GATE_CATEGORIES` (default `factual`) routes only factual questions
+to the loop and falls back to the fixed pipeline for everything else;
+set it to `all` to remove the gate, or to any comma-separated subset of
+`factual,conceptual,procedural,comparative,opinion`:
+
+```bash
+./agentic-query.sh --full --gate-categories all "compare X and Y"   # opt into the latency
+```
+
+| Config knob | Default | Effect |
+|---|---|---|
+| `AGENTIC_DEEP_ENABLED` | `false` | Master switch; `--full` uses the fixed pipeline when `false`. |
+| `AGENTIC_MAX_STEPS` | `4` | Max tool-call steps before the loop must produce a final answer. |
+| `AGENTIC_GATE_CATEGORIES` | `factual` | Categories routed to the loop; others fall back to the fixed pipeline. `all` disables the gate. |
+
+This stays off by default and is not merged into `query.sh` — it's a
+standalone experiment you opt into per-call or via `config.env`.
+
 ## Performance (measured on the test machine)
 
 All figures are on the [OptiPlex 3070 / i5-9500T / 16 GB / CPU-only](#the-test-machine)
@@ -574,9 +617,11 @@ All of this lives in `setup-rag-core.sh` and is written once to
 | `setup-rag-llm-backend.sh` | Migrate LLM backend from Ollama to llama-swap + llama.cpp |
 | `setup-rag-ingest.sh` | Create document ingestion pipeline |
 | `setup-rag-query.sh` | Create query processing pipeline |
+| `setup-rag-agentic-query.sh` | Create the experimental agentic deep-tier variant (`agentic-query.sh`) |
 | `setup-rag-backup.sh` | Backup and restore utilities |
 | `ingest.sh` | Ingest documents |
 | `query.sh` | Query the system |
+| `agentic-query.sh` | Experimental: `query.sh` clone where the deep tier can use a ReAct-style loop instead of the fixed pipeline |
 | `status.sh` | Check system status |
 | `monitor.sh` | Real-time monitoring dashboard |
 | `evaluate.sh` | Run RAGAS quality evaluation |
