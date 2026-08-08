@@ -359,9 +359,12 @@ a clear win on factual questions — matches the fixed pipeline's answer
 quality while using fewer LLM calls and finishing *faster* — but on
 comparative/procedural/multi-hop questions it trades noticeably better
 answers for 2–3x the latency (one outlier took 400+ seconds). So
-`AGENTIC_GATE_CATEGORIES` (default `factual`) routes only factual questions
-to the loop and falls back to the fixed pipeline for everything else;
-set it to `all` to remove the gate, or to any comma-separated subset of
+`AGENTIC_GATE_CATEGORIES` (default `factual,conceptual,opinion`) routes
+factual questions to the loop (confirmed win) plus conceptual/opinion
+(untested by that comparison, but not known to have the latency problem
+either) — comparative/procedural/multi-hop stay excluded because that's
+exactly where the 2–3x latency hit was measured. Set it to `all` to remove
+the gate entirely, or to any comma-separated subset of
 `factual,conceptual,procedural,comparative,opinion`:
 
 ```bash
@@ -372,7 +375,7 @@ set it to `all` to remove the gate, or to any comma-separated subset of
 |---|---|---|
 | `AGENTIC_DEEP_ENABLED` | `false` | Master switch; `--full` uses the fixed pipeline when `false`. |
 | `AGENTIC_MAX_STEPS` | `4` | Max tool-call steps before the loop must produce a final answer. |
-| `AGENTIC_GATE_CATEGORIES` | `factual` | Categories routed to the loop; others fall back to the fixed pipeline. `all` disables the gate. |
+| `AGENTIC_GATE_CATEGORIES` | `factual,conceptual,opinion` | Categories routed to the loop; others fall back to the fixed pipeline. `all` disables the gate. |
 
 This stays off by default and is not merged into `query.sh` — it's a
 standalone experiment you opt into per-call or via `config.env`.
