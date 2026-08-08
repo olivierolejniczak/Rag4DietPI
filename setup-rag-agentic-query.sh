@@ -62,6 +62,7 @@ existing fixed pipeline (lib/query_main.py::main) unchanged.
 import os
 import sys
 import time
+import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -211,6 +212,7 @@ def run_agentic_deep(query: str, max_steps: int | None = None):
         return {"answer": answer, "chunks": collected_chunks, "path": "agentic-loop"}
 
     except Exception as e:
+        traceback.print_exc(file=sys.stderr)
         print(f"[agentic_deep] fallback: {type(e).__name__}: {e}", file=sys.stderr)
         return None
 
