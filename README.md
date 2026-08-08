@@ -377,6 +377,46 @@ set it to `all` to remove the gate, or to any comma-separated subset of
 This stays off by default and is not merged into `query.sh` — it's a
 standalone experiment you opt into per-call or via `config.env`.
 
+### Remote ingestion (LAN API)
+
+`ingest.sh` is normally CLI-only, run on the box itself. `setup-rag-ingest-api.sh`
+generates `lib/ingest_api.py` (FastAPI) and installs it as `rag-ingest-api.service`,
+binding `0.0.0.0:8090` so any device on the LAN can trigger ingestion and poll job
+status/logs, without touching the CLI workflow. Every job shells out to the real
+`./ingest.sh` as a subprocess — the API never reimplements ingestion logic, so the
+CLI and the API can never drift apart.
+
+```bash
+sudo ./setup-rag-ingest-api.sh "$PROJECT_DIR"   # generates lib/ingest_api.py + rag-ingest-api.service
+```
+
+**Test lab only: no authentication, no TLS, no rate limiting, by design.**
+Anyone who can reach the host on the LAN can trigger ingestion or read job logs.
+Don't expose this port beyond a trusted LAN.
+
+Endpoints:
+
+| Endpoint | Body / params | Effect |
+|---|---|---|
+| `POST /ingest` | `{"path": "subdir/under/documents"}` or `{"url": "https://..."}`, optional `"force"`/`"recreate"` (bool) | Maps straight to `ingest.sh`'s real flags (`--force`, `--recreate`, `--url`, or a path). `path` is resolved under `DOCUMENTS_DIR` and rejected if it escapes it. |
+| `POST /ingest/upload` | multipart file(s), optional `force`/`recreate` query params | Stages uploaded files under `DOCUMENTS_DIR/_api_uploads/<job_id>/`, then ingests that folder. |
+| `GET /status/{job_id}` | — | `{"status": "running"\|"done"\|"failed", "cmd": [...], "log_tail": "..."}` |
+| `GET /jobs` | — | List of all tracked jobs (in-memory only — a service restart clears history). |
+
+```bash
+curl -X POST http://<host>:8090/ingest -H 'Content-Type: application/json' \
+     -d '{"path": "reports", "force": true}'
+curl http://<host>:8090/status/<job_id>
+```
+
+| Config knob | Default | Effect |
+|---|---|---|
+| `INGEST_API_PORT` | `8090` | Port the service binds on (`0.0.0.0`). |
+
+Runs as root (same as `ingest.sh` itself — `DOCUMENTS_DIR` defaults to `/root/documents`),
+with standard systemd hardening (`NoNewPrivileges`, `PrivateTmp`, etc.) short of
+`ProtectHome`, which would block that root-owned documents directory.
+
 ## Performance (measured on the test machine)
 
 All figures are on the [OptiPlex 3070 / i5-9500T / 16 GB / CPU-only](#the-test-machine)
@@ -618,6 +658,7 @@ All of this lives in `setup-rag-core.sh` and is written once to
 | `setup-rag-ingest.sh` | Create document ingestion pipeline |
 | `setup-rag-query.sh` | Create query processing pipeline |
 | `setup-rag-agentic-query.sh` | Create the experimental agentic deep-tier variant (`agentic-query.sh`) |
+| `setup-rag-ingest-api.sh` | Install the LAN-reachable HTTP ingest API (`rag-ingest-api.service`) |
 | `setup-rag-backup.sh` | Backup and restore utilities |
 | `ingest.sh` | Ingest documents |
 | `query.sh` | Query the system |
