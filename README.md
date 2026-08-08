@@ -353,29 +353,28 @@ AGENTIC_DEEP_ENABLED=true ./agentic-query.sh --full "your question"
 ./agentic-query.sh --full --agentic "your question"
 ```
 
-**Category-gated by default.** A same-corpus comparison (18 questions,
-factual/comparative/procedural/multi-hop, English-pinned) found the loop is
-a clear win on factual questions — matches the fixed pipeline's answer
-quality while using fewer LLM calls and finishing *faster* — but on
-comparative/procedural/multi-hop questions it trades noticeably better
-answers for 2–3x the latency (one outlier took 400+ seconds). So
-`AGENTIC_GATE_CATEGORIES` (default `factual,conceptual,opinion`) routes
-factual questions to the loop (confirmed win) plus conceptual/opinion
-(untested by that comparison, but not known to have the latency problem
-either) — comparative/procedural/multi-hop stay excluded because that's
-exactly where the 2–3x latency hit was measured. Set it to `all` to remove
-the gate entirely, or to any comma-separated subset of
+**Gate now disabled by default (`all`).** Two same-corpus comparisons — 18
+questions (factual/comparative/procedural/multi-hop) then 6 more
+(conceptual/opinion) — found the agentic loop matches or beats the fixed
+pipeline's answer quality on *every* category tested, with 0/24
+fallback-to-fixed across both runs. The only real cost is latency: faster
+than the fixed pipeline on factual, ~1.3x on conceptual/opinion, but 2–3x on
+comparative/procedural/multi-hop (one outlier took 400+ seconds). `all`
+means accepting that latency hit on those three categories in exchange for
+consistently better answers everywhere. Narrow `AGENTIC_GATE_CATEGORIES` back
+to a subset (e.g. `factual,conceptual,opinion`) if the deep tier needs to
+stay latency-bounded — comma-separated subset of
 `factual,conceptual,procedural,comparative,opinion`:
 
 ```bash
-./agentic-query.sh --full --gate-categories all "compare X and Y"   # opt into the latency
+./agentic-query.sh --full --gate-categories factual,conceptual,opinion "..."   # narrower / faster
 ```
 
 | Config knob | Default | Effect |
 |---|---|---|
 | `AGENTIC_DEEP_ENABLED` | `false` | Master switch; `--full` uses the fixed pipeline when `false`. |
 | `AGENTIC_MAX_STEPS` | `4` | Max tool-call steps before the loop must produce a final answer. |
-| `AGENTIC_GATE_CATEGORIES` | `factual,conceptual,opinion` | Categories routed to the loop; others fall back to the fixed pipeline. `all` disables the gate. |
+| `AGENTIC_GATE_CATEGORIES` | `all` | Categories routed to the loop; others fall back to the fixed pipeline. `all` disables the gate. |
 
 This stays off by default and is not merged into `query.sh` — it's a
 standalone experiment you opt into per-call or via `config.env`.
