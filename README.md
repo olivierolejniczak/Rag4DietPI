@@ -417,6 +417,54 @@ Runs as root (same as `ingest.sh` itself — `DOCUMENTS_DIR` defaults to `/root/
 with standard systemd hardening (`NoNewPrivileges`, `PrivateTmp`, etc.) short of
 `ProtectHome`, which would block that root-owned documents directory.
 
+#### How it works under the hood
+
+`lib/ingest_api.py` is a small FastAPI app with no persistence layer — it exists
+purely to translate HTTP requests into `subprocess.Popen(["./ingest.sh", ...])`
+calls and track the result:
+
+- **Job execution.** Each accepted request builds an argument list that mirrors
+  `ingest.sh`'s real CLI flags exactly (`--force`, `--recreate`, `--url <url>`, or
+  a resolved path) and launches it as a detached subprocess with stdout/stderr
+  redirected to `logs/ingest-<job_id>.log`. The API never calls into
+  `lib/ingest_main.py` or any other pipeline code directly — the CLI script is
+  the only entry point, by design, so there is exactly one ingestion code path
+  to maintain and test.
+- **Job tracking.** A `job_id` (short UUID) maps to the `Popen` handle, the
+  command that was run, and the log path, held in a single in-memory dict
+  guarded by a lock. `GET /status/{job_id}` calls `proc.poll()` live to report
+  `running`/`done`/`failed`, plus the last ~8KB of the log file. Nothing is
+  written to disk beyond the log itself, so job history does not survive a
+  service restart — acceptable for a lab tool where jobs are short-lived and
+  reproducible (just re-POST the same request).
+- **Path safety.** The `path` field in `POST /ingest` is resolved relative to
+  `DOCUMENTS_DIR` (read from `config.env`, same as `ingest.sh`) and rejected
+  with `400` if it's absolute or if `Path.resolve()` walks it outside that
+  directory (e.g. `"../../etc"` or `"/etc/passwd"`) — this is what stops a LAN
+  client from pointing ingestion at arbitrary filesystem paths.
+- **Upload mode.** `POST /ingest/upload` doesn't reuse the `path` field at all;
+  uploaded files are written to a fresh `DOCUMENTS_DIR/_api_uploads/<job_id>/`
+  directory (filenames stripped of any path components first) and *that*
+  directory is what gets passed to `ingest.sh` — so uploaded content is always
+  confined to a directory the API itself created.
+
+**How this was tested.** Hitting `127.0.0.1` only proves the process is alive,
+not that it's reachable as a LAN service, so verification used a throwaway
+Docker container (`docker run curlimages/curl ...`) on the existing `docker0`
+bridge — a genuinely separate network namespace with its own IP — sending
+requests to the host's real LAN address (e.g. `192.168.x.x:8090`) instead of
+loopback. That exercised the full path a real device on the LAN would take:
+routing through the kernel, past `iptables`/`nft` (checked for anything that
+might silently drop the port), into the `0.0.0.0`-bound service. From that
+"remote" container: health check, a real `POST /ingest` job that ran the
+actual pipeline end-to-end, `GET /status` + `GET /jobs` polling, a multipart
+`POST /ingest/upload`, and both path-escape payloads correctly rejected with
+`400`. Every collection/log file created by these test runs was deleted
+afterward so no test artifacts remain in the corpus.
+
+`status.sh` reports this service too (`Ingest API (LAN, opt-in): OK (:8090)`,
+or `not installed` if `setup-rag-ingest-api.sh` hasn't been run yet).
+
 ## Performance (measured on the test machine)
 
 All figures are on the [OptiPlex 3070 / i5-9500T / 16 GB / CPU-only](#the-test-machine)

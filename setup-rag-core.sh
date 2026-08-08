@@ -839,6 +839,13 @@ curl -sf --max-time 2 "${LLM_API_BASE:-http://127.0.0.1:11434/v1}/models" > /dev
 echo -n "SearXNG: "
 curl -s --max-time 2 "${SEARXNG_URL:-http://localhost:8085/search}?q=test&format=json" 2>/dev/null | grep -q '"results"' && echo -e "${G}OK${N}" || echo -e "${Y}Limited${N}"
 
+echo -n "Ingest API (LAN, opt-in): "
+if systemctl list-unit-files 2>/dev/null | grep -q '^rag-ingest-api\.service'; then
+    curl -sf --max-time 2 "http://127.0.0.1:${INGEST_API_PORT:-8090}/" > /dev/null 2>&1 && echo -e "${G}OK${N} (:${INGEST_API_PORT:-8090})" || echo -e "${R}NOT running${N}"
+else
+    echo -e "${Y}not installed${N} (setup-rag-ingest-api.sh)"
+fi
+
 echo ""
 echo "=== Python Components ==="
 python3 -c "from fastembed import TextEmbedding" 2>/dev/null && echo -e "FastEmbed: ${G}OK${N}" || echo -e "FastEmbed: ${R}Missing${N}"
