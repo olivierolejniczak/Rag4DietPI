@@ -4086,7 +4086,7 @@ def is_valid_url(url, base_domain, config):
     except Exception:
         return False
 
-def extract_links(html, base_url, config=None):
+def extract_links(html, base_url, config):
     """Extract links from HTML content"""
     links = []
     try:
@@ -4107,7 +4107,7 @@ def extract_links(html, base_url, config=None):
                 absolute_url = urljoin(base_url, href)
                 links.append(absolute_url)
     except Exception as e:
-        if config and config.get("debug"):
+        if config.get("debug"):
             print(f"  [WARN] Link extraction error: {e}", file=sys.stderr)
     
     return links
