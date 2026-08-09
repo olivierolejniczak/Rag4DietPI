@@ -4086,7 +4086,7 @@ def is_valid_url(url, base_domain, config):
     except Exception:
         return False
 
-def extract_links(html, base_url):
+def extract_links(html, base_url, config=None):
     """Extract links from HTML content"""
     links = []
     try:
@@ -4107,7 +4107,7 @@ def extract_links(html, base_url):
                 absolute_url = urljoin(base_url, href)
                 links.append(absolute_url)
     except Exception as e:
-        if config.get("debug"):
+        if config and config.get("debug"):
             print(f"  [WARN] Link extraction error: {e}", file=sys.stderr)
     
     return links
@@ -4406,7 +4406,7 @@ def crawl(start_url, config):
         
         # Extract and queue links (if not at max depth)
         if depth < config["max_depth"]:
-            links = extract_links(html, url)
+            links = extract_links(html, url, config)
             for link in links:
                 if is_valid_url(link, base_domain, config):
                     normalized_link = normalize_url(link)

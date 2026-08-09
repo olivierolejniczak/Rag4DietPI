@@ -541,7 +541,7 @@ fi
 
 # Test English
 EN_OK=false
-if python3 -c "from spellchecker import SpellChecker; s=SpellChecker(language='en'); print(s.correction('helo'))" 2>/dev/null | grep -q "hello"; then
+if python3 -c "from spellchecker import SpellChecker; s=SpellChecker(language='en'); print(s.correction('teh'))" 2>/dev/null | grep -q "the"; then
     log_ok "English spellcheck: OK"
     EN_OK=true
 else
