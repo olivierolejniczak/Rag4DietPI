@@ -43,6 +43,7 @@ trap 'log_err "Echec inattendu (ligne $LINENO). Rien n'"'"'a ete desactive de fo
 # Configuration
 # ============================================================================
 PROJECT_DIR="${1:-$(pwd)}"
+PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"  # canonicalize: systemd unit files need an absolute WorkingDirectory
 CONFIG_ENV="$PROJECT_DIR/config.env"
 # Les actifs du service (modeles GGUF + YAML) vivent HORS de PROJECT_DIR, dans un
 # emplacement systeme appartenant a ragsvc. Indispensable quand PROJECT_DIR est
