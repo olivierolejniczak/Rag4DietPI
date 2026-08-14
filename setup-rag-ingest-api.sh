@@ -23,6 +23,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 PROJECT_DIR="${1:-$(pwd)}"
+PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"  # canonicalize: systemd unit files need an absolute WorkingDirectory
 
 echo "============================================"
 echo " RAG System - Ingest API Setup"

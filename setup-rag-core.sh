@@ -36,6 +36,7 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 # Configuration
 # ============================================================================
 PROJECT_DIR="${1:-$(pwd)}"
+PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"  # canonicalize: systemd unit files need an absolute WorkingDirectory
 
 # Qdrant settings
 QDRANT_CONTAINER_NAME="qdrant"
