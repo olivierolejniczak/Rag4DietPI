@@ -847,6 +847,13 @@ else
     echo -e "${Y}not installed${N} (setup-rag-ingest-api.sh)"
 fi
 
+echo -n "Query UI (LAN, opt-in): "
+if systemctl list-unit-files 2>/dev/null | grep -q '^rag-query-ui\.service'; then
+    curl -sf --max-time 2 "http://127.0.0.1:${QUERY_UI_PORT:-8091}/" > /dev/null 2>&1 && echo -e "${G}OK${N} (:${QUERY_UI_PORT:-8091})" || echo -e "${R}NOT running${N}"
+else
+    echo -e "${Y}not installed${N} (setup-rag-query-ui.sh)"
+fi
+
 echo ""
 echo "=== Python Components ==="
 python3 -c "from fastembed import TextEmbedding" 2>/dev/null && echo -e "FastEmbed: ${G}OK${N}" || echo -e "FastEmbed: ${R}Missing${N}"

@@ -467,6 +467,52 @@ afterward so no test artifacts remain in the corpus.
 `status.sh` reports this service too (`Ingest API (LAN, opt-in): OK (:8090)`,
 or `not installed` if `setup-rag-ingest-api.sh` hasn't been run yet).
 
+### Remote querying (LAN web UI)
+
+`query.sh` is normally CLI-only, run on the box itself. `setup-rag-query-ui.sh`
+generates `lib/query_ui.py` (FastAPI) and installs it as `rag-query-ui.service`,
+binding `0.0.0.0:8091` so any device on the LAN can ask questions from a browser
+instead of SSHing in. Every question shells out to the real `./query.sh` as a
+subprocess — the UI never reimplements the query pipeline, so the CLI and the
+UI can never drift apart.
+
+```bash
+sudo ./setup-rag-query-ui.sh "$PROJECT_DIR"   # generates lib/query_ui.py + rag-query-ui.service
+```
+
+**Test lab only: no authentication, no TLS, no rate limiting, by design.**
+Anyone who can reach the host on the LAN can submit queries. Don't expose this
+port beyond a trusted LAN.
+
+Open `http://<host>:8091/` from any LAN device for a single-page form (question
+box, mode selector, optional `--source` filter). Or call it directly:
+
+| Endpoint | Body / params | Effect |
+|---|---|---|
+| `GET /` | — | Serves the HTML page. |
+| `POST /api/query` | `{"question": "...", "mode": "default", "source": ""}` | Runs `./query.sh [--mode] [--source ...] "question"` and returns `{"output": "..."}` (the CLI's full stdout, including sources). |
+
+```bash
+curl -X POST http://<host>:8091/api/query -H 'Content-Type: application/json' \
+     -d '{"question": "what is X?", "mode": "rag-only"}'
+```
+
+`mode` must be one of `default`, `rag-only`, `web-only`, `ultrafast`, `full` —
+same names as the `query.sh` flags, minus the `--`.
+
+| Config knob | Default | Effect |
+|---|---|---|
+| `QUERY_UI_PORT` | `8091` | Port the service binds on (`0.0.0.0`). |
+| `QUERY_UI_TIMEOUT` | `300` | Seconds before a request gives up on `query.sh` (raise this if you use `--full` a lot). |
+
+Requests block until `query.sh` exits or the timeout is hit — there is no
+streaming and no job queue, unlike the ingest API. That's fine for a
+single-user LAN tool, but a slow `--full` query ties up that request for its
+full duration.
+
+`status.sh` reports this service too (`Query UI (LAN, opt-in): OK (:8091)`,
+or `not installed` if `setup-rag-query-ui.sh` hasn't been run yet).
+
 ## Performance (measured on the test machine)
 
 All figures are on the [OptiPlex 3070 / i5-9500T / 16 GB / CPU-only](#the-test-machine)
@@ -709,6 +755,7 @@ All of this lives in `setup-rag-core.sh` and is written once to
 | `setup-rag-query.sh` | Create query processing pipeline |
 | `setup-rag-agentic-query.sh` | Create the experimental agentic deep-tier variant (`agentic-query.sh`) |
 | `setup-rag-ingest-api.sh` | Install the LAN-reachable HTTP ingest API (`rag-ingest-api.service`) |
+| `setup-rag-query-ui.sh` | Install the LAN-reachable query web UI (`rag-query-ui.service`) |
 | `setup-rag-backup.sh` | Backup and restore utilities |
 | `ingest.sh` | Ingest documents |
 | `query.sh` | Query the system |
