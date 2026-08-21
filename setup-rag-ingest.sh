@@ -339,8 +339,87 @@ import hashlib
 # into the text when PAGE_ALIGNED_CHUNKING_ENABLED=true (veille GitHub, tache 4).
 _PAGE_MARKER_RE = re.compile(r'\n?\x0c\[PAGE:(\d+)\]\x0c\n?')
 
+_HEADING_RE = re.compile(r'^(#{1,2})\s+(.+)$')
 
-def smart_chunk_paginated(text, chunk_size=500, chunk_overlap=80, min_chunk_size=100, max_chunk_size=1200):
+
+def _build_parent_groups(text, parent_max_chars):
+    """parent/child: group text into header-bounded parent sections.
+
+    Splits on the same '#'/'##' boundary smart_chunk() already uses, then:
+    - merges consecutive small sections together (up to parent_max_chars),
+      so short sections don't each become their own tiny, low-context parent;
+    - force-splits any single section that alone exceeds parent_max_chars,
+      so no parent blob is large enough to blow the prompt budget.
+
+    Returns a list of {"text": ..., "section_path": "H1 -> H2" or None}.
+    """
+    raw_sections = re.split(r'(?=\n##?\s)', text)
+
+    groups = []
+    stack = []
+    pending_text = ""
+    pending_path = None
+
+    def flush_pending():
+        nonlocal pending_text, pending_path
+        if pending_text.strip():
+            groups.append({"text": pending_text.strip(), "section_path": pending_path})
+        pending_text = ""
+        pending_path = None
+
+    for section in raw_sections:
+        if not section.strip():
+            continue
+
+        first_line = section.strip().split("\n", 1)[0]
+        m = _HEADING_RE.match(first_line)
+        if m:
+            level = len(m.group(1))
+            title = m.group(2).strip()
+            stack = stack[:level - 1] + [title]
+        current_path = " -> ".join(stack) if stack else None
+
+        if len(section) > parent_max_chars:
+            # This section alone is too big to be one parent - flush whatever
+            # was pending, then force-split it into its own parent pieces.
+            flush_pending()
+            remainder = section
+            while len(remainder) > parent_max_chars:
+                split_point = _find_split_point(remainder, parent_max_chars)
+                if split_point < 1:
+                    split_point = parent_max_chars
+                groups.append({"text": remainder[:split_point].strip(), "section_path": current_path})
+                remainder = remainder[split_point:]
+            if remainder.strip():
+                groups.append({"text": remainder.strip(), "section_path": current_path})
+            continue
+
+        if pending_text and len(pending_text) + len(section) + 2 > parent_max_chars:
+            flush_pending()
+        pending_text = (pending_text + "\n\n" + section) if pending_text else section
+        pending_path = pending_path or current_path
+
+    flush_pending()
+    return groups
+
+
+def _smart_chunk_with_parents(text, chunk_size, chunk_overlap, min_chunk_size, max_chunk_size, parent_max_chars):
+    """parent/child: chunk each header-bounded parent group independently,
+    tagging every resulting child chunk with the parent it came from."""
+    chunks = []
+    for group in _build_parent_groups(text, parent_max_chars):
+        parent_id = hashlib.md5(group["text"].encode("utf-8")).hexdigest()[:16]
+        children = smart_chunk(group["text"], chunk_size, chunk_overlap, min_chunk_size, max_chunk_size)
+        for c in children:
+            c["parent_id"] = parent_id
+            c["parent_text"] = group["text"]
+            c["section_path"] = group["section_path"]
+        chunks.extend(children)
+    return chunks
+
+
+def smart_chunk_paginated(text, chunk_size=500, chunk_overlap=80, min_chunk_size=100, max_chunk_size=1200,
+                           enable_parents=False, parent_max_chars=4000):
     """Page-aligned variant of smart_chunk(): splits on the page markers
     first, then runs smart_chunk() independently on each page's text, so no
     chunk ever spans a page boundary and every chunk carries a page_number.
@@ -351,42 +430,52 @@ def smart_chunk_paginated(text, chunk_size=500, chunk_overlap=80, min_chunk_size
     """
     parts = _PAGE_MARKER_RE.split(text)
     if len(parts) == 1:
-        return smart_chunk(text, chunk_size, chunk_overlap, min_chunk_size, max_chunk_size)
+        return smart_chunk(text, chunk_size, chunk_overlap, min_chunk_size, max_chunk_size,
+                            enable_parents, parent_max_chars)
 
     # re.split() with one capturing group returns [pre, page_num, page_text, page_num, page_text, ...]
     chunks = []
     pre = parts[0]
     if pre.strip():
-        for c in smart_chunk(pre, chunk_size, chunk_overlap, min_chunk_size, max_chunk_size):
+        for c in smart_chunk(pre, chunk_size, chunk_overlap, min_chunk_size, max_chunk_size,
+                              enable_parents, parent_max_chars):
             c["page_number"] = None
             chunks.append(c)
 
     for i in range(1, len(parts), 2):
         page_number = int(parts[i])
         page_text = parts[i + 1] if i + 1 < len(parts) else ""
-        for c in smart_chunk(page_text, chunk_size, chunk_overlap, min_chunk_size, max_chunk_size):
+        for c in smart_chunk(page_text, chunk_size, chunk_overlap, min_chunk_size, max_chunk_size,
+                              enable_parents, parent_max_chars):
             c["page_number"] = page_number
             chunks.append(c)
 
     return chunks
 
 
-def smart_chunk(text, chunk_size=500, chunk_overlap=80, min_chunk_size=100, max_chunk_size=1200):
+def smart_chunk(text, chunk_size=500, chunk_overlap=80, min_chunk_size=100, max_chunk_size=1200,
+                 enable_parents=False, parent_max_chars=4000):
     """Split text into semantic chunks
-    
+
     Args:
         text: Input text to chunk
         chunk_size: Target chunk size in characters
         chunk_overlap: Overlap between chunks
         min_chunk_size: Minimum chunk size
         max_chunk_size: Maximum chunk size
-    
+        enable_parents: parent/child - when True, group text into
+            header-bounded parent sections (<= parent_max_chars) first, then
+            chunk each parent independently, tagging every resulting child
+            with parent_id/parent_text/section_path. Off by default so
+            existing collections/callers see no behavior change.
+        parent_max_chars: Cap on parent section size (see enable_parents).
+
     Returns:
         list: List of chunk dictionaries with text and metadata
     """
     if not text or not text.strip():
         return []
-    
+
     # Guard against pathological config that could stall the force-split loops
     # below (each iteration subtracts chunk_overlap from the split point).
     chunk_overlap = max(0, min(chunk_overlap, chunk_size - 1))
@@ -394,16 +483,22 @@ def smart_chunk(text, chunk_size=500, chunk_overlap=80, min_chunk_size=100, max_
     # Clean text
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = re.sub(r' {2,}', ' ', text)
-    
+
     chunks = []
-    
+
     # Detect content type for specialized handling
     if _is_table_content(text):
         return _chunk_table(text, max_chunk_size)
-    
+
     if _is_code_content(text):
         return _chunk_code(text, chunk_size, max_chunk_size)
-    
+
+    # parent/child: only applies to the standard semantic-chunking path below
+    # (table/code content has its own structure and no header hierarchy).
+    if enable_parents:
+        return _smart_chunk_with_parents(text, chunk_size, chunk_overlap, min_chunk_size,
+                                          max_chunk_size, parent_max_chars)
+
     # Standard semantic chunking
     # Split on semantic boundaries
     sections = re.split(r'(?=\n##?\s)', text)
@@ -3561,6 +3656,9 @@ def _int_env(key, default):
 def page_aligned_chunking_enabled():
     return os.environ.get("PAGE_ALIGNED_CHUNKING_ENABLED", "false").lower() == "true"
 
+def parent_chunking_enabled():
+    return os.environ.get("PARENT_CHUNKING_ENABLED", "false").lower() == "true"
+
 def get_file_hash(file_path):
     """Calculate MD5 hash of file"""
     hasher = hashlib.md5()
@@ -3658,6 +3756,8 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
         chunk_overlap=chunk_overlap,
         min_chunk_size=_int_env("MIN_CHUNK_SIZE", 100),
         max_chunk_size=_int_env("MAX_CHUNK_SIZE", 1200),
+        enable_parents=parent_chunking_enabled(),
+        parent_max_chars=_int_env("PARENT_MAX_CHARS", 4000),
     )
     
     if not chunks:
@@ -3752,10 +3852,13 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
                     "context": chunk.get("context") or None,
                     "raptor_layer": chunk.get("raptor_layer"),
                     "page_number": chunk.get("page_number"),
+                    "parent_id": chunk.get("parent_id"),
+                    "parent_text": chunk.get("parent_text"),
+                    "section_path": chunk.get("section_path"),
                     "ingested_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 }
             })
-        
+
         batch_size = _int_env("QDRANT_BATCH_SIZE", 100)
         success = upload_hybrid_points(collection_name, points, batch_size)
     else:
@@ -3777,6 +3880,9 @@ def ingest_file(file_path, qdrant_host, collection_name, chunk_size=500, chunk_o
                     "context": chunk.get("context") or None,
                     "raptor_layer": chunk.get("raptor_layer"),
                     "page_number": chunk.get("page_number"),
+                    "parent_id": chunk.get("parent_id"),
+                    "parent_text": chunk.get("parent_text"),
+                    "section_path": chunk.get("section_path"),
                     "ingested_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 }
             })
@@ -4480,6 +4586,7 @@ export TMPDIR="${TMPDIR:-/tmp}"
 export QDRANT_HOST QDRANT_GRPC_PORT COLLECTION_NAME DOCUMENTS_DIR
 export SPARSE_EMBED_ENABLED SPARSE_EMBED_MODEL HYBRID_SEARCH_MODE
 export CHUNK_SIZE CHUNK_OVERLAP FASTEMBED_MODEL FASTEMBED_CACHE_DIR EMBEDDING_DIMENSION
+export PARENT_CHUNKING_ENABLED PARENT_MAX_CHARS
 export DENSE_VECTOR_NAME SPARSE_VECTOR_NAME
 export CSV_NL_TRANSFORM_ENABLED CSV_NL_DUAL_MODE CSV_NL_LANG
 export WEB_CRAWLER_MAX_PAGES WEB_CRAWLER_MAX_DEPTH WEB_CRAWLER_DELAY

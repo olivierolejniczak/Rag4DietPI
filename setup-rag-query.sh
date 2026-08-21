@@ -1366,6 +1366,9 @@ def hybrid_search(query, top_k=5, alpha=0.5, hyde_embedding=None, collection=Non
                 "section": payload.get("section", ""),
                 "chunk_type": payload.get("chunk_type", "chunk"),
                 "parser": payload.get("parser", "unknown"),
+                "parent_id": payload.get("parent_id"),
+                "parent_text": payload.get("parent_text"),
+                "section_path": payload.get("section_path"),
             })
     
     return results
@@ -1541,6 +1544,9 @@ def _hybrid_search_client(query, top_k=5, hyde_embedding=None, collection=None):
                     "page_number": payload.get("page_number"),
                     "parser": payload.get("parser", "unknown"),
                     "sparse_model": payload.get("sparse_model", ""),
+                    "parent_id": payload.get("parent_id"),
+                    "parent_text": payload.get("parent_text"),
+                    "section_path": payload.get("section_path"),
                 })
         
         if debug:
@@ -1634,6 +1640,9 @@ def _hybrid_search_http(query, top_k=5, hyde_embedding=None, collection=None):
                     "page_number": payload.get("page_number"),
                     "parser": payload.get("parser", "unknown"),
                     "sparse_model": payload.get("sparse_model", ""),
+                    "parent_id": payload.get("parent_id"),
+                    "parent_text": payload.get("parent_text"),
+                    "section_path": payload.get("section_path"),
                 })
         
         if debug:
@@ -2001,8 +2010,49 @@ def apply_diversity_filter(chunks, threshold=0.85):
         
         if not is_duplicate:
             filtered.append(chunk)
-    
+
     return filtered
+
+
+def resolve_parents(chunks):
+    """parent/child: swap each chunk's text for its parent section's text.
+
+    Rerank/CRAG scoring already happened against the precise child text
+    (kept in "child_text"/"rerank_score" etc.) - this only runs right before
+    context assembly, to trade retrieval precision for generation recall.
+    Chunks lacking a parent_id (old collections, or ingested with
+    PARENT_CHUNKING_ENABLED=false) pass through unchanged.
+
+    Also collapses multiple children that share the same parent_id into a
+    single context block, so one section isn't injected twice when two
+    neighboring children both make the top-k (see also apply_diversity_filter).
+    """
+    if not chunks:
+        return chunks
+
+    resolved = []
+    seen_parent_ids = set()
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            resolved.append(chunk)
+            continue
+
+        parent_id = chunk.get("parent_id")
+        parent_text = chunk.get("parent_text")
+        if not parent_id or not parent_text:
+            resolved.append(chunk)
+            continue
+
+        if parent_id in seen_parent_ids:
+            continue
+        seen_parent_ids.add(parent_id)
+
+        new_chunk = chunk.copy()
+        new_chunk["child_text"] = chunk.get("text", "")
+        new_chunk["text"] = parent_text
+        resolved.append(new_chunk)
+
+    return resolved
 EOFPY
 log_ok "post_retrieval.py"
 
@@ -4237,7 +4287,7 @@ from query_enhancement import (
 )
 from hybrid_search import hybrid_search, hybrid_search_all_collections, get_hybrid_mode
 from collection_utils import collection_for_source
-from post_retrieval import rerank_chunks, crag_process, apply_rse, expand_context_window, apply_diversity_filter
+from post_retrieval import rerank_chunks, crag_process, apply_rse, expand_context_window, apply_diversity_filter, resolve_parents
 from generation import generate_answer, verify_grounding, is_non_answer
 from quality_ledger import QualityLedger, compute_retrieval_confidence, compute_answer_coverage, compute_entity_coverage
 from memory import ConversationMemory
@@ -4283,6 +4333,7 @@ def get_config():
         "web_search_enabled": os.environ.get("WEB_SEARCH_ENABLED", "true").lower() == "true",
         "rse_enabled": os.environ.get("RSE_ENABLED", "false").lower() == "true",
         "context_window_enabled": os.environ.get("CONTEXT_WINDOW_ENABLED", "false").lower() == "true",
+        "parent_expansion_enabled": os.environ.get("PARENT_EXPANSION_ENABLED", "false").lower() == "true",
         "diversity_filter_enabled": os.environ.get("DIVERSITY_FILTER_ENABLED", "false").lower() == "true",
         "grounding_check_enabled": os.environ.get("GROUNDING_CHECK_ENABLED", "false").lower() == "true",
         "citations_enabled": os.environ.get("CITATIONS_ENABLED", "false").lower() == "true",
@@ -4430,6 +4481,8 @@ def _retrieve(query, config, verbose):
         chunks = apply_diversity_filter(chunks, config["diversity_threshold"])
     if config["context_window_enabled"]:
         chunks = expand_context_window(chunks, config["context_window_size"])
+    if config["parent_expansion_enabled"]:
+        chunks = resolve_parents(chunks)
     if config["rse_enabled"]:
         chunks = apply_rse(query, chunks)
 
